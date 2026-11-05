@@ -1,14 +1,14 @@
-"""Thin ``comfy_low`` transport over httpx — sync and async.
+"""Thin ``turbine_low`` transport over httpx2 — sync and async.
 
 One function per ``operationId`` in ``spec/openapi.yaml``, plus the mandatory
-escape hatches the hand-written ``comfy_sdk`` layer builds on:
+escape hatches the hand-written ``turbine_sdk`` layer builds on:
 
-* **raw response access** — ``raw_request`` returns the fully-read ``httpx.Response``;
+* **raw response access** — ``raw_request`` returns the fully-read ``httpx2.Response``;
 * **unbuffered / streaming bodies** — ``open`` yields a streaming response, and
   ``post_assets`` streams its multipart body instead of buffering the file;
 * **all headers** — every method that needs them exposes the response headers;
 * **per-request timeout / abort** — every method takes ``timeout`` and the raw
-  httpx cancellation applies.
+  httpx2 cancellation applies.
 
 One family of bindings is *not* backed by an ``operationId`` *in this module's
 sense*: the model bindings. ``post_model_run`` targets a different surface —
@@ -18,7 +18,7 @@ of these methods speak to, and it is declared by a *second* vendored contract,
 ``spec/router-openapi.yaml`` (``operationId: runRouterModel``, path
 ``/v2/models/{provider}/{model}``). Nothing is generated from that second file
 yet, so the binding is still hand-written; what changed is that it is no longer
-hand-*invented*. It stays out of ``comfy_low.OPERATION_IDS`` (which is the
+hand-*invented*. It stays out of ``turbine_low.OPERATION_IDS`` (which is the
 ``spec/openapi.yaml`` set, exactly) and stays confined to ``model_run_request``
 / :data:`_MODEL_RUN_PATH_TEMPLATE`, so a Router spec sync is a one-place change
 — and ``tests/test_router_spec_contract.py`` plus ``scripts/check_drift.py``
@@ -44,7 +44,7 @@ follow the run path's rule: their routes live in :data:`_MODEL_CATALOG_PATH` /
 :data:`_MODEL_SCHEMA_PATH_TEMPLATE` alone, pinned against the vendored file.
 
 This layer contains no orchestration, retries, hashing, or reconnection — those
-live in ``comfy_sdk``.
+live in ``turbine_sdk``.
 """
 
 from __future__ import annotations
@@ -56,18 +56,27 @@ import sys
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from typing import Annotated, Any, BinaryIO, NoReturn, cast
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
-import httpx
+import httpx2
 from pydantic import BeforeValidator, create_model
 
 from . import _multipart
 from .errors import ApiError, clean_body_excerpt, clean_request_id, error_from_envelope
+from .extension_transport import (
+    estimate_url,
+    node_catalog_url,
+    parse_native_response,
+    prepare_estimate,
+)
 from .models import Asset, Job, JobWorkflowResponse
+from .models.catalog import NodeCatalog
+from .models.graph import PromptGraph
+from .models.pricing import EstimateReply
 from .sse import RawEvent, SSEDecoder
 
 _API = "/api/v2"
@@ -77,9 +86,9 @@ _UNSET = object()
 # so no data at all for ~3x that means the connection has silently stalled
 # ("zombie": open but delivering nothing) rather than being legitimately idle.
 # Applying a read timeout makes that case raise a ReadTimeout, which
-# comfy_sdk.Job.events() catches and turns into a poll/reconnect — instead of
+# turbine_sdk.Job.events() catches and turns into a poll/reconnect — instead of
 # blocking iter_lines() forever. (Pass timeout=None to opt out of the timeout.)
-_SSE_IDLE_TIMEOUT = httpx.Timeout(10.0, read=45.0)
+_SSE_IDLE_TIMEOUT = httpx2.Timeout(10.0, read=45.0)
 
 #: Default timeout for a model run. A run is *awaited server-side*: the server
 #: holds the connection until the generation is complete, polling the upstream
@@ -87,22 +96,16 @@ _SSE_IDLE_TIMEOUT = httpx.Timeout(10.0, read=45.0)
 #: willing to wait minutes, not the tens of seconds a normal API call gets —
 #: the client's own default (30s) would abort a perfectly healthy generation.
 #: ``connect`` stays short: an unreachable host is not a slow generation.
-MODEL_RUN_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
+MODEL_RUN_TIMEOUT = httpx2.Timeout(600.0, connect=10.0)
 
-#: Base URL of Comfy Router — the surface ``post_model_run`` targets, and the
-#: ``servers[0].url`` of ``spec/router-openapi.yaml``. It is a *different host*
-#: from the ``/api/v2`` deployment ``base_url`` names: the v2 surface serves
-#: jobs and assets, Router serves the model-ID-addressed invocation routes. A
-#: caller redirects it with ``COMFY_ROUTER_BASE_URL`` (see
-#: :data:`comfy_sdk.client.ROUTER_BASE_URL_ENV_VAR`), which is deliberately a
-#: second variable rather than a reuse of ``COMFY_BASE_URL`` — pointing one
-#: variable at both would send jobs to Router or model runs to the v2 API.
+#: Canonical upstream Router origin from the vendored contract. It is a wire
+#: comparison constant, never an implicit client target; Router is explicit-only.
 ROUTER_BASE_URL = "https://api.comfy.org"
 
 #: Route for a model run, verbatim from ``spec/router-openapi.yaml`` — the path
 #: whose ``post.operationId`` is ``runRouterModel``. It is NOT an ``operationId``
 #: from ``spec/openapi.yaml`` (a different contract), so this binding is
-#: deliberately absent from ``comfy_low.OPERATION_IDS`` (the spec-coverage test
+#: deliberately absent from ``turbine_low.OPERATION_IDS`` (the spec-coverage test
 #: asserts that set equals *that* spec's, exactly) and is still hand-bound
 #: rather than generated — nothing generates from the Router spec yet.
 #: Everything about the wire shape is confined to this constant and
@@ -144,7 +147,7 @@ _MODEL_SCHEMA_PATH_TEMPLATE = _MODEL_RUN_PATH_TEMPLATE + "/openapi.json"
 #: server already holds, so nothing here waits on a generation — the bound is
 #: the client's ordinary 30s, stated here so it does not silently follow a
 #: client configured with a much longer (or shorter) timeout for other calls.
-DISCOVERY_TIMEOUT = httpx.Timeout(30.0)
+DISCOVERY_TIMEOUT = httpx2.Timeout(30.0)
 
 #: Longest request id accepted into a path. The contract mints UUIDs (36
 #: characters); the bound exists so a server-controlled value that is NOT one
@@ -165,7 +168,7 @@ class BinaryResult:
     """A completed model run whose native output is bytes rather than JSON.
 
     What ``post_model_run`` and ``get_model_request_result`` — and so
-    ``comfy_sdk.models.run`` and the queued surface's own result fetch — return
+    ``turbine_sdk.models.run`` and the queued surface's own result fetch — return
     instead of a ``dict`` when Comfy Router answers under a media type that is
     not JSON. Router forwards the partner model's output *unchanged*, and for a
     model whose partner answers a generation directly as bytes (the ElevenLabs
@@ -224,9 +227,9 @@ def media_type(content_type: str | None) -> str:
     "the response said nothing" case callers branch on separately from "the
     response said something that is not JSON".
 
-    A comma ends the type as surely as a semicolon does. ``httpx.Headers.get``
+    A comma ends the type as surely as a semicolon does. ``httpx2.Headers.get``
     joins a header sent *twice* with ``", "`` — the same joining
-    :func:`comfy_low.errors.clean_request_id` already has to allow for — and
+    :func:`turbine_low.errors.clean_request_id` already has to allow for — and
     intermediaries do duplicate ``Content-Type``, so a perfectly ordinary JSON
     answer can arrive as ``"application/json, application/json"``. Splitting on
     the semicolon alone would read that as a type of its own, decide it is not
@@ -493,7 +496,7 @@ def model_schema_headers(etag: str | None) -> dict[str, str] | None:
     Raises ``ValueError`` before any request for an empty or non-ASCII tag: an
     empty header makes the read effectively unconditional, so a ``304`` to it
     could not honestly mean "your copy is current", and a non-ASCII value would
-    fail inside httpx's header encoding as an untyped ``UnicodeEncodeError``.
+    fail inside httpx2's header encoding as an untyped ``UnicodeEncodeError``.
     """
     if etag is None:
         return None
@@ -505,7 +508,7 @@ def model_schema_headers(etag: str | None) -> dict[str, str] | None:
 
 
 def model_schema_answer(
-    p: _Prepared, resp: httpx.Response, etag: str | None
+    p: _Prepared, resp: httpx2.Response, etag: str | None
 ) -> dict[str, Any] | None:
     """The schema document, or ``None`` for a ``304`` to a conditional read.
 
@@ -537,16 +540,16 @@ def _build_user_agent(client_info: str | None) -> str:
     integration attribute its own traffic.
     """
     try:
-        ver = _pkg_version("comfy-sdk")
+        ver = _pkg_version("turbine-sdk")
     except PackageNotFoundError:
         ver = "0"
     ua = (
-        f"comfy-sdk-python/{ver} "
+        f"turbine-sdk-python/{ver} "
         f"({platform.python_implementation()} {sys.version_info.major}.{sys.version_info.minor})"
     )
     if client_info:
         # A caller-set token goes verbatim into a header value; reject CR/LF so
-        # it can never split/inject headers (httpx would reject it anyway, but
+        # it can never split/inject headers (httpx2 would reject it anyway, but
         # fail fast with a clear message at construction).
         if "\r" in client_info or "\n" in client_info:
             raise ValueError("client_info must not contain CR or LF characters")
@@ -554,7 +557,7 @@ def _build_user_agent(client_info: str | None) -> str:
     return ua
 
 
-def _retry_after(resp: httpx.Response) -> int | None:
+def _retry_after(resp: httpx2.Response) -> int | None:
     raw = resp.headers.get("Retry-After")
     if raw is None:
         return None
@@ -565,19 +568,19 @@ def _retry_after(resp: httpx.Response) -> int | None:
 
 
 #: Response header carrying the server-minted id for the call. Spelled here as
-#: well as in :data:`comfy_sdk.router_exceptions.REQUEST_ID_HEADER` because the
+#: well as in :data:`turbine_sdk.router_exceptions.REQUEST_ID_HEADER` because the
 #: two layers read it independently — the router surface off its own error
-#: response, this one off the shared error envelope — and ``comfy_low`` never
-#: imports from ``comfy_sdk``. ``tests/test_error_contract.py`` asserts the two
+#: response, this one off the shared error envelope — and ``turbine_low`` never
+#: imports from ``turbine_sdk``. ``tests/test_error_contract.py`` asserts the two
 #: spellings agree, so they cannot drift apart.
 REQUEST_ID_HEADER = "X-Comfy-Request-Id"
 
 
-def _request_id(resp: httpx.Response) -> str | None:
+def _request_id(resp: httpx2.Response) -> str | None:
     """``X-Comfy-Request-Id`` as a bounded, printable string, or ``None``.
 
     Filtered rather than kept verbatim — see
-    :func:`comfy_low.errors.clean_request_id`, which both error surfaces share
+    :func:`turbine_low.errors.clean_request_id`, which both error surfaces share
     so the id cannot be safe to display on one and not the other.
     """
     return clean_request_id(resp.headers.get(REQUEST_ID_HEADER))
@@ -588,7 +591,7 @@ def origin(url: str) -> tuple[str, str, int | None]:
 
     Public because it is the single definition of "same target" in the SDK: the
     transport decides here whether a URL may carry the bearer token, and
-    ``comfy_sdk.client`` compares against it to recognize Comfy Cloud however
+    ``turbine_sdk.client`` compares against it to recognize Comfy Cloud however
     the caller spelled it. Two spellings that differ only in case or in an
     explicitly written default port are the same origin.
     """
@@ -617,6 +620,30 @@ def redact_userinfo(url: str) -> str:
     return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
 
 
+def _validate_base_url(raw: str, setting: str) -> str:
+    """Validate configuration before a request can be built, without echoing credentials."""
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{setting} must be a non-blank http(s) URL")
+    value = raw.strip()
+    try:
+        parts = urlsplit(value)
+        _port = parts.port
+        parsed = httpx2.URL(value)
+        valid = (
+            parts.scheme in ("http", "https")
+            and bool(parts.hostname)
+            and bool(parsed.host)
+            and not any(char.isspace() for char in parts.netloc)
+            and "?" not in value
+            and "#" not in value
+        )
+    except (ValueError, httpx2.InvalidURL):
+        valid = False
+    if not valid:
+        raise ValueError(f"{setting} must be an http(s) URL with no query or fragment")
+    return value.rstrip("/")
+
+
 class _Prepared:
     """Sans-IO request building shared by both transports."""
 
@@ -625,29 +652,24 @@ class _Prepared:
         base_url: str,
         api_key: str | None,
         client_info: str | None = None,
-        router_base_url: str = ROUTER_BASE_URL,
+        router_base_url: str | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _validate_base_url(base_url, "base_url")
         self.api_key = api_key
         #: ``base_url`` with any userinfo redacted — what every ``repr`` shows.
         self.safe_base_url = redact_userinfo(self.base_url)
         self._base_origin = origin(self.base_url)
         parts = urlsplit(self.base_url)
         self._origin_url = f"{parts.scheme}://{parts.netloc}"
-        #: Comfy Router's base URL — a *second* target, used only by
-        #: ``post_model_run``, which builds an absolute URL against it rather
-        #: than going through :meth:`url` (that method prepends ``/api/v2``,
-        #: which is the other surface's mount prefix, not Router's).
-        self.router_base_url = router_base_url.rstrip("/")
-        # Checked here rather than left to httpx: `url()` passes a string
-        # through only when it starts with `http`, so a non-http router base
-        # would silently fall through to the `base_url + /api/v2 + ...` branch
-        # and send the run to the wrong surface under a mangled URL instead of
-        # failing with a sentence that names the setting.
-        if not self.router_base_url.startswith(("http://", "https://")):
-            raise ValueError(f"router_base_url must be an http(s) URL; got {router_base_url!r}")
-        self.safe_router_base_url = redact_userinfo(self.router_base_url)
-        self._router_origin = origin(self.router_base_url)
+        self.router_base_url = (
+            _validate_base_url(router_base_url, "router_base_url")
+            if router_base_url is not None
+            else None
+        )
+        self.safe_router_base_url = (
+            redact_userinfo(self.router_base_url) if self.router_base_url is not None else None
+        )
+        self._router_origin = origin(self.router_base_url) if self.router_base_url else None
         self._user_agent = _build_user_agent(client_info)
 
     def __repr__(self) -> str:
@@ -664,45 +686,65 @@ class _Prepared:
         # A server link (job.urls.*, marked by containing /api/) already carries
         # the server's mount prefix, so it resolves against the origin — joining
         # it to base_url would double the prefix on a prefix-mounted surface.
-        if path.startswith("http"):
+        if path.lower().startswith(("http://", "https://")):
             return path
         if path.startswith("/") and "/api/" in path:
             return self._origin_url + path
         return self.base_url + _API + path
 
+    def router_url(self, path: str) -> str:
+        if self.router_base_url is None:
+            raise ValueError("Router is disabled; pass router_base_url=... to enable client.models")
+        return self.router_base_url + path
+
+    def prepare_request(
+        self,
+        client: httpx2.Client | httpx2.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        headers: dict[str, str] | None,
+        json: Any,
+        content: Any,
+        timeout: Any,
+        external: bool,
+    ) -> tuple[httpx2.Request, Any]:
+        kw: dict[str, Any] = {}
+        if timeout is not _UNSET:
+            kw["timeout"] = timeout
+        url = self.url(path)
+        request = client.build_request(
+            method, url, headers=self.headers(url, headers), json=json, content=content, **kw
+        )
+        trusted = origin(url) in (self._base_origin, self._router_origin)
+        if external or not trusted:
+            # build_request merges default headers; removing it before that
+            # merge would silently restore the caller's Authorization header.
+            request.headers.pop("Authorization", None)
+            return request, httpx2.Auth()
+        if self.api_key:
+            # A default Basic/custom auth must not replace the explicit SDK key.
+            return request, httpx2.Auth()
+        return request, httpx2.USE_CLIENT_DEFAULT
+
     def headers(self, url: str, extra: dict[str, str] | None = None) -> dict[str, str]:
         # User-Agent goes on every request (all origins — it is not a
         # credential); a caller-supplied one in ``extra`` still wins.
         h: dict[str, str] = {"User-Agent": self._user_agent}
-        # Only authenticate when a key is set: a local proxy fronts a ComfyUI
-        # with no auth, so we never leak credentials it does not want. And only
-        # attach it when the resolved request URL is same-origin as one of this
-        # client's own *configured* targets: server-returned absolute follow-up
-        # links (job.urls.self/cancel/events) must not carry the key to a
-        # different scheme/host/port. Relative paths are always resolved under
-        # base_url, so they are unaffected.
-        #
-        # There are two configured targets rather than one because the SDK
-        # speaks to two surfaces: the ``/api/v2`` deployment (`base_url`) and
-        # Comfy Router (`router_base_url`), which is a different host by
-        # default. Both come from the client's own construction — a constant, or
-        # an environment variable the operator set — never from a server
-        # response, so trusting the router origin does not widen what a
-        # malicious server can point the credential at. A third origin still
-        # gets nothing; ``tests/test_transport_security.py`` asserts it.
+        # Only the two explicitly configured origins may receive the SDK bearer.
         if self.api_key and origin(url) in (self._base_origin, self._router_origin):
             h["Authorization"] = f"Bearer {self.api_key}"
         if extra:
             h.update(extra)
         return h
 
-    def parse_or_raise(self, resp: httpx.Response, ok: tuple[int, ...]) -> dict[str, Any]:
+    def parse_or_raise(self, resp: httpx2.Response, ok: tuple[int, ...]) -> dict[str, Any]:
         if resp.status_code in ok:
             return self._decode_json(resp)
         self._raise_for_response(resp)
 
     def parse_run_result(
-        self, resp: httpx.Response, ok: tuple[int, ...]
+        self, resp: httpx2.Response, ok: tuple[int, ...]
     ) -> dict[str, Any] | BinaryResult:
         """:meth:`parse_or_raise` for an operation whose success may not be JSON.
 
@@ -778,7 +820,7 @@ class _Prepared:
             return self._binary_result(resp)
         self._raise_for_response(resp)
 
-    def _binary_result(self, resp: httpx.Response) -> BinaryResult:
+    def _binary_result(self, resp: httpx2.Response) -> BinaryResult:
         # The whole header rather than the bare media type: the partner's
         # parameters are part of what the bytes are (`audio/L16; rate=16000`
         # says nothing without its `rate`), and the whole point of the surface
@@ -800,7 +842,7 @@ class _Prepared:
             request_id=_request_id(resp),
         )
 
-    def _decode_json(self, resp: httpx.Response) -> dict[str, Any]:
+    def _decode_json(self, resp: httpx2.Response) -> dict[str, Any]:
         if not resp.content:
             return {}
         try:
@@ -824,7 +866,7 @@ class _Prepared:
                 body_excerpt=_body_excerpt(resp),
             ) from exc
 
-    def _raise_for_response(self, resp: httpx.Response) -> NoReturn:
+    def _raise_for_response(self, resp: httpx2.Response) -> NoReturn:
         body: dict[str, Any] | None
         try:
             body = resp.json()
@@ -849,7 +891,7 @@ class _Prepared:
         )
 
 
-def _body_excerpt(resp: httpx.Response) -> str | None:
+def _body_excerpt(resp: httpx2.Response) -> str | None:
     """A bounded, single-line excerpt of ``resp``'s body text, or ``None``.
 
     Read off every error response and off a success whose body would not
@@ -886,7 +928,7 @@ def parse_expiry(url: str) -> datetime | None:
     if not date_vals or not expires_vals:
         return None
     try:
-        issued = datetime.strptime(date_vals[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        issued = datetime.strptime(date_vals[0], "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC)
         seconds = int(expires_vals[0])
         return issued + timedelta(seconds=seconds)
     except (ValueError, OverflowError):
@@ -903,7 +945,7 @@ async def _async_multipart_body(chunks: Iterator[bytes]) -> AsyncIterator[bytes]
     """Bridge the sync multipart chunk generator into an async byte stream.
 
     ``_multipart.build_multipart`` reads the file with blocking ``read()`` calls
-    (it has to — file objects are sync). ``httpx.AsyncClient`` requires an async
+    (it has to — file objects are sync). ``httpx2.AsyncClient`` requires an async
     iterable body, so each ``next()`` (which may block on a file read) is run in
     a worker thread via ``asyncio.to_thread`` — that keeps the event loop free
     while still streaming chunk-by-chunk instead of buffering the whole file.
@@ -1007,7 +1049,7 @@ def _jobs_list_path(
     return f"/jobs?{query}" if query else "/jobs"
 
 
-class ComfyLow:
+class TurbineLow:
     """Synchronous protocol bindings."""
 
     def __init__(
@@ -1015,18 +1057,20 @@ class ComfyLow:
         base_url: str,
         api_key: str | None = None,
         *,
-        client: httpx.Client | None = None,
+        client: httpx2.Client | None = None,
         timeout: float | None = 30.0,
         client_info: str | None = None,
-        router_base_url: str = ROUTER_BASE_URL,
+        router_base_url: str | None = None,
     ) -> None:
+        if client is not None and not isinstance(client, httpx2.Client):
+            raise TypeError("client must be an httpx2.Client")
         self._p = _Prepared(base_url, api_key, client_info, router_base_url)
         self._own_client = client is None
-        self._client = client or httpx.Client(timeout=timeout, follow_redirects=True)
+        self._client = client or httpx2.Client(timeout=timeout, follow_redirects=True)
 
     # -- configuration ----------------------------------------------------
     # Read-only views of the settings this transport was built with, so a layer
-    # above (a ``comfy_sdk`` client namespace) can report the configuration it
+    # above (a ``turbine_sdk`` client namespace) can report the configuration it
     # shares without reaching into private attributes. Both read through to the
     # live objects, so a later change to either is reflected here.
     @property
@@ -1040,7 +1084,7 @@ class ComfyLow:
         return self._p.safe_base_url
 
     @property
-    def router_base_url(self) -> str:
+    def router_base_url(self) -> str | None:
         """Comfy Router's base URL — where :meth:`post_model_run` sends its request.
 
         A second target, not a view of :attr:`base_url`: model runs are
@@ -1050,18 +1094,20 @@ class ComfyLow:
         return self._p.router_base_url
 
     @property
-    def safe_router_base_url(self) -> str:
+    def safe_router_base_url(self) -> str | None:
         """:attr:`router_base_url` with any userinfo redacted — safe to log."""
         return self._p.safe_router_base_url
 
     @property
-    def timeout(self) -> httpx.Timeout:
-        """The httpx client's default timeout. A per-request ``timeout=`` still wins."""
+    def timeout(self) -> httpx2.Timeout:
+        """The httpx2 client's default timeout. A per-request ``timeout=`` still wins."""
         return self._client.timeout
 
     @property
     def authenticated(self) -> bool:
-        """Whether a credential is attached to same-origin requests.
+        """Whether the SDK bearer is configured for trusted origins.
+
+        Authentication configured on an injected HTTPX2 client is separate.
 
         The key itself is deliberately not exposed here: this is the read a
         layer above (or a ``repr``) needs, and it cannot leak the credential.
@@ -1079,7 +1125,7 @@ class ComfyLow:
         if self._own_client:
             self._client.close()
 
-    def __enter__(self) -> ComfyLow:
+    def __enter__(self) -> TurbineLow:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -1095,20 +1141,13 @@ class ComfyLow:
         json: Any = None,
         content: Any = None,
         timeout: Any = _UNSET,
-    ) -> httpx.Response:
-        """Fully-read raw response — headers, status, and body all accessible."""
-        kw: dict[str, Any] = {}
-        if timeout is not _UNSET:
-            kw["timeout"] = timeout
-        url = self._p.url(path)
-        return self._client.request(
-            method,
-            url,
-            headers=self._p.headers(url, headers),
-            json=json,
-            content=content,
-            **kw,
-        )
+    ) -> httpx2.Response:
+        """Fully-read raw response using the configured HTTPX2 client."""
+        with self.open(
+            method, path, headers=headers, json=json, content=content, timeout=timeout
+        ) as response:
+            response.read()
+            return response
 
     @contextmanager
     def open(
@@ -1120,23 +1159,88 @@ class ComfyLow:
         json: Any = None,
         content: Any = None,
         timeout: Any = _UNSET,
-    ) -> Iterator[httpx.Response]:
-        """Streaming (unbuffered) response for binary and SSE bodies."""
-        kw: dict[str, Any] = {}
-        if timeout is not _UNSET:
-            kw["timeout"] = timeout
-        url = self._p.url(path)
-        with self._client.stream(
+        follow_redirects: bool | None = None,
+        _external: bool = False,
+    ) -> Iterator[httpx2.Response]:
+        """Stream a response and close every hop on success, failure or cancellation."""
+        request, auth = self._p.prepare_request(
+            self._client,
             method,
-            url,
-            headers=self._p.headers(url, headers),
+            path,
+            headers=headers,
             json=json,
             content=content,
-            **kw,
-        ) as resp:
-            yield resp
+            timeout=timeout,
+            external=_external,
+        )
+        follow = self._client.follow_redirects if follow_redirects is None else follow_redirects
+        history: list[httpx2.Response] = []
+        while True:
+            if len(history) > self._client.max_redirects:
+                raise httpx2.TooManyRedirects(
+                    "Exceeded maximum allowed redirects.", request=request
+                )
+            response = self._client.send(request, auth=auth, follow_redirects=False, stream=True)
+            response.history = list(history)
+            try:
+                if not follow or response.next_request is None:
+                    yield response
+                    return
+                next_request = response.next_request
+                if origin(str(next_request.url)) != origin(str(request.url)):
+                    # HTTPX also permits auth on http->https upgrades. Our
+                    # configured-origin rule deliberately includes the scheme.
+                    next_request.headers.pop("Authorization", None)
+                    auth = httpx2.Auth()
+                response.read()
+                history.append(response)
+                request = next_request
+                # Preserve custom/challenge auth within the original origin.
+                # Once a redirect crosses origins it stays suppressed.
+            finally:
+                response.close()
 
-    # -- assets -----------------------------------------------------------
+    def get_external_content(self, url: str, *, timeout: Any = _UNSET) -> httpx2.Response:
+        """Download arbitrary bytes without SDK or client-default Authorization."""
+        with self.open(
+            "GET", url, timeout=timeout, follow_redirects=True, _external=True
+        ) as response:
+            response.read()
+            return response
+
+    # -- native Turbine extensions (outside upstream OPERATION_IDS) --------
+    def get_node_catalog(self, *, timeout: Any = _UNSET) -> NodeCatalog:
+        response = self.raw_request("GET", node_catalog_url(self.base_url), timeout=timeout)
+        return parse_native_response(
+            response,
+            NodeCatalog,
+            retry_after=_retry_after(response),
+            request_id=_request_id(response),
+        )
+
+    def get_node_definition(self, class_type: str, *, timeout: Any = _UNSET) -> NodeCatalog:
+        response = self.raw_request(
+            "GET", node_catalog_url(self.base_url, class_type), timeout=timeout
+        )
+        return parse_native_response(
+            response,
+            NodeCatalog,
+            retry_after=_retry_after(response),
+            request_id=_request_id(response),
+        )
+
+    def post_prompt_estimate(
+        self, prompt: PromptGraph | dict[str, Any], *, timeout: Any = _UNSET
+    ) -> EstimateReply:
+        body = prepare_estimate(prompt)
+        response = self.raw_request("POST", estimate_url(self.base_url), json=body, timeout=timeout)
+        return parse_native_response(
+            response,
+            EstimateReply,
+            retry_after=_retry_after(response),
+            request_id=_request_id(response),
+        )
+
     def post_assets(
         self,
         file: BinaryIO,
@@ -1224,7 +1328,7 @@ class ComfyLow:
         *,
         range: tuple[int, int] | None = None,
         timeout: Any = _UNSET,
-    ) -> Iterator[httpx.Response]:
+    ) -> Iterator[httpx2.Response]:
         """GET /api/v2/assets/{id}/content — raw, streamed, range-aware body.
 
         Yields the streaming response (escape hatch); the caller iterates bytes.
@@ -1233,7 +1337,11 @@ class ComfyLow:
         if range is not None:
             headers["Range"] = f"bytes={range[0]}-{range[1]}"
         with self.open(
-            "GET", f"/assets/{asset_id}/content", headers=headers, timeout=timeout
+            "GET",
+            f"/assets/{asset_id}/content",
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=True,
         ) as resp:
             if resp.status_code not in (200, 206):
                 resp.read()
@@ -1262,9 +1370,7 @@ class ComfyLow:
         kw: dict[str, Any] = {}
         if timeout is not _UNSET:
             kw["timeout"] = timeout
-        with self._client.stream(
-            "GET", url, headers=self._p.headers(url), follow_redirects=False, **kw
-        ) as resp:
+        with self.open("GET", url, follow_redirects=False, **kw) as resp:
             if resp.has_redirect_location:
                 location = resp.headers["Location"]
                 return location, parse_expiry(location)
@@ -1333,7 +1439,7 @@ class ComfyLow:
     def get_job_events(self, job_id_or_url: str, *, timeout: Any = _UNSET) -> Iterator[RawEvent]:
         """GET /api/v2/jobs/{id}/events — raw live SSE iterator (escape hatch).
 
-        No reconnection here; a single connection's frames. ``comfy_sdk`` adds the
+        No reconnection here; a single connection's frames. ``turbine_sdk`` adds the
         reconnect loop. Defaults to a read-idle timeout (``_SSE_IDLE_TIMEOUT``, well
         above the server's keepalive interval) so a silently-stalled connection
         raises instead of blocking forever; pass ``timeout=None`` to disable.
@@ -1428,7 +1534,7 @@ class ComfyLow:
             strict_mode=strict_mode,
             fallback_provider=fallback_provider,
         )
-        url = self._p.router_base_url + path
+        url = self._p.router_url(path)
         resp = self.raw_request("POST", url, headers=headers, json=body, timeout=timeout)
         return self._p.parse_run_result(resp, (200, 201)), resp.headers
 
@@ -1450,7 +1556,7 @@ class ComfyLow:
         *,
         idempotency_key: str | None = None,
         timeout: Any = _UNSET,
-    ) -> tuple[dict[str, Any], httpx.Headers]:
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
         """POST ``{router_base_url}/v2/models/{provider}/{model}/requests`` — queued.
 
         The queued sibling of :meth:`post_model_run`: same host, same
@@ -1475,27 +1581,27 @@ class ComfyLow:
         any request when ``model`` is not a ``{provider}/{model}`` id.
         """
         path, body, headers = model_submit_request(model, arguments, idempotency_key)
-        url = self._p.router_base_url + path
+        url = self._p.router_url(path)
         resp = self.raw_request("POST", url, headers=headers, json=body, timeout=timeout)
         return self._p.parse_or_raise(resp, (200, 201, 202)), resp.headers
 
     def get_model_request_status(
         self, model: str, request_id: str, *, timeout: Any = _UNSET
-    ) -> tuple[dict[str, Any], httpx.Headers]:
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
         """GET the queue status of one submitted request — the authoritative read.
 
         This is the source of truth for how far a queued request has got, and
         the only one: there is no stream to reconcile against on this surface.
         """
-        url = self._p.router_base_url + model_request_path(
-            model, request_id, _MODEL_REQUEST_STATUS_PATH_TEMPLATE
+        url = self._p.router_url(
+            model_request_path(model, request_id, _MODEL_REQUEST_STATUS_PATH_TEMPLATE)
         )
         resp = self.raw_request("GET", url, timeout=timeout)
         return self._p.parse_or_raise(resp, (200,)), resp.headers
 
     def get_model_request_result(
         self, model: str, request_id: str, *, timeout: Any = _UNSET
-    ) -> tuple[dict[str, Any] | BinaryResult, httpx.Headers]:
+    ) -> tuple[dict[str, Any] | BinaryResult, httpx2.Headers]:
         """GET the finished result of one submitted request.
 
         The body is the provider's own payload, exactly as
@@ -1507,15 +1613,15 @@ class ComfyLow:
         generation directly as bytes is not a JSON document here either. See
         :meth:`_Prepared.parse_run_result`.
         """
-        url = self._p.router_base_url + model_request_path(
-            model, request_id, _MODEL_REQUEST_PATH_TEMPLATE
+        url = self._p.router_url(
+            model_request_path(model, request_id, _MODEL_REQUEST_PATH_TEMPLATE)
         )
         resp = self.raw_request("GET", url, timeout=timeout)
         return self._p.parse_run_result(resp, (200,)), resp.headers
 
     def put_model_request_cancel(
         self, model: str, request_id: str, *, timeout: Any = _UNSET
-    ) -> tuple[dict[str, Any], httpx.Headers]:
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
         """PUT a cancellation for one submitted request.
 
         A request, not a guarantee — a deployment that answers ``204`` gives an
@@ -1523,8 +1629,8 @@ class ComfyLow:
         authoritative state is whatever :meth:`get_model_request_status` says
         next, exactly as it is for a job.
         """
-        url = self._p.router_base_url + model_request_path(
-            model, request_id, _MODEL_REQUEST_CANCEL_PATH_TEMPLATE
+        url = self._p.router_url(
+            model_request_path(model, request_id, _MODEL_REQUEST_CANCEL_PATH_TEMPLATE)
         )
         resp = self.raw_request("PUT", url, timeout=timeout)
         return self._p.parse_or_raise(resp, (200, 202, 204)), resp.headers
@@ -1536,14 +1642,14 @@ class ComfyLow:
         cursor: str | None = None,
         limit: int | None = None,
         timeout: Any = DISCOVERY_TIMEOUT,
-    ) -> tuple[dict[str, Any], httpx.Headers]:
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
         """GET ``{router_base_url}/v2/models`` — one page of the model catalog.
 
         ``listRouterModels`` of ``spec/router-openapi.yaml``, hand-bound — see
         :data:`_MODEL_CATALOG_PATH`. Returns ``(body, headers)`` so the caller
         can read ``X-Comfy-Request-Id`` off a success.
         """
-        url = self._p.router_base_url + model_catalog_path(cursor, limit)
+        url = self._p.router_url(model_catalog_path(cursor, limit))
         resp = self.raw_request("GET", url, timeout=timeout)
         return self._p.parse_or_raise(resp, (200,)), resp.headers
 
@@ -1553,7 +1659,7 @@ class ComfyLow:
         *,
         etag: str | None = None,
         timeout: Any = DISCOVERY_TIMEOUT,
-    ) -> tuple[dict[str, Any] | None, httpx.Headers]:
+    ) -> tuple[dict[str, Any] | None, httpx2.Headers]:
         """GET ``{router_base_url}/v2/models/{provider}/{model}/openapi.json``.
 
         ``getRouterModelInputSchema`` of ``spec/router-openapi.yaml``. With
@@ -1565,30 +1671,32 @@ class ComfyLow:
         is not a ``{provider}/{model}`` id (:func:`parse_model_id`) or ``etag``
         is not a non-empty ASCII string (:func:`model_schema_headers`).
         """
-        url = self._p.router_base_url + model_schema_path(model)
+        url = self._p.router_url(model_schema_path(model))
         headers = model_schema_headers(etag)
         resp = self.raw_request("GET", url, headers=headers, timeout=timeout)
         return model_schema_answer(self._p, resp, etag), resp.headers
 
 
-class AsyncComfyLow:
-    """Asynchronous protocol bindings — mirrors :class:`ComfyLow`."""
+class AsyncTurbineLow:
+    """Asynchronous protocol bindings — mirrors :class:`TurbineLow`."""
 
     def __init__(
         self,
         base_url: str,
         api_key: str | None = None,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: httpx2.AsyncClient | None = None,
         timeout: float | None = 30.0,
         client_info: str | None = None,
-        router_base_url: str = ROUTER_BASE_URL,
+        router_base_url: str | None = None,
     ) -> None:
+        if client is not None and not isinstance(client, httpx2.AsyncClient):
+            raise TypeError("client must be an httpx2.AsyncClient")
         self._p = _Prepared(base_url, api_key, client_info, router_base_url)
         self._own_client = client is None
-        self._client = client or httpx.AsyncClient(timeout=timeout, follow_redirects=True)
+        self._client = client or httpx2.AsyncClient(timeout=timeout, follow_redirects=True)
 
-    # -- configuration (mirrors :class:`ComfyLow`) -------------------------
+    # -- configuration (mirrors :class:`TurbineLow`) -------------------------
     @property
     def base_url(self) -> str:
         """Base URL every relative API path is resolved against."""
@@ -1600,23 +1708,23 @@ class AsyncComfyLow:
         return self._p.safe_base_url
 
     @property
-    def router_base_url(self) -> str:
-        """Comfy Router's base URL — mirrors :attr:`ComfyLow.router_base_url`."""
+    def router_base_url(self) -> str | None:
+        """Comfy Router's base URL — mirrors :attr:`TurbineLow.router_base_url`."""
         return self._p.router_base_url
 
     @property
-    def safe_router_base_url(self) -> str:
+    def safe_router_base_url(self) -> str | None:
         """:attr:`router_base_url` with any userinfo redacted — safe to log."""
         return self._p.safe_router_base_url
 
     @property
-    def timeout(self) -> httpx.Timeout:
-        """The httpx client's default timeout. A per-request ``timeout=`` still wins."""
+    def timeout(self) -> httpx2.Timeout:
+        """The httpx2 client's default timeout. A per-request ``timeout=`` still wins."""
         return self._client.timeout
 
     @property
     def authenticated(self) -> bool:
-        """Whether a credential is attached — mirrors :attr:`ComfyLow.authenticated`."""
+        """Whether a credential is attached — mirrors :attr:`TurbineLow.authenticated`."""
         return bool(self._p.api_key)
 
     def __repr__(self) -> str:
@@ -1629,7 +1737,7 @@ class AsyncComfyLow:
         if self._own_client:
             await self._client.aclose()
 
-    async def __aenter__(self) -> AsyncComfyLow:
+    async def __aenter__(self) -> AsyncTurbineLow:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
@@ -1644,19 +1752,13 @@ class AsyncComfyLow:
         json: Any = None,
         content: Any = None,
         timeout: Any = _UNSET,
-    ) -> httpx.Response:
-        kw: dict[str, Any] = {}
-        if timeout is not _UNSET:
-            kw["timeout"] = timeout
-        url = self._p.url(path)
-        return await self._client.request(
-            method,
-            url,
-            headers=self._p.headers(url, headers),
-            json=json,
-            content=content,
-            **kw,
-        )
+    ) -> httpx2.Response:
+        """Fully-read raw response using the configured HTTPX2 client."""
+        async with self.open(
+            method, path, headers=headers, json=json, content=content, timeout=timeout
+        ) as response:
+            await response.aread()
+            return response
 
     @asynccontextmanager
     async def open(
@@ -1668,20 +1770,91 @@ class AsyncComfyLow:
         json: Any = None,
         content: Any = None,
         timeout: Any = _UNSET,
-    ) -> AsyncIterator[httpx.Response]:
-        kw: dict[str, Any] = {}
-        if timeout is not _UNSET:
-            kw["timeout"] = timeout
-        url = self._p.url(path)
-        async with self._client.stream(
+        follow_redirects: bool | None = None,
+        _external: bool = False,
+    ) -> AsyncIterator[httpx2.Response]:
+        """Stream a response and close every hop on success, failure or cancellation."""
+        request, auth = self._p.prepare_request(
+            self._client,
             method,
-            url,
-            headers=self._p.headers(url, headers),
+            path,
+            headers=headers,
             json=json,
             content=content,
-            **kw,
-        ) as resp:
-            yield resp
+            timeout=timeout,
+            external=_external,
+        )
+        follow = self._client.follow_redirects if follow_redirects is None else follow_redirects
+        history: list[httpx2.Response] = []
+        while True:
+            if len(history) > self._client.max_redirects:
+                raise httpx2.TooManyRedirects(
+                    "Exceeded maximum allowed redirects.", request=request
+                )
+            response = await self._client.send(
+                request, auth=auth, follow_redirects=False, stream=True
+            )
+            response.history = list(history)
+            try:
+                if not follow or response.next_request is None:
+                    yield response
+                    return
+                next_request = response.next_request
+                if origin(str(next_request.url)) != origin(str(request.url)):
+                    # HTTPX also permits auth on http->https upgrades. Our
+                    # configured-origin rule deliberately includes the scheme.
+                    next_request.headers.pop("Authorization", None)
+                    auth = httpx2.Auth()
+                await response.aread()
+                history.append(response)
+                request = next_request
+                # Preserve custom/challenge auth within the original origin.
+                # Once a redirect crosses origins it stays suppressed.
+            finally:
+                await response.aclose()
+
+    async def get_external_content(self, url: str, *, timeout: Any = _UNSET) -> httpx2.Response:
+        """Download arbitrary bytes without SDK or client-default Authorization."""
+        async with self.open(
+            "GET", url, timeout=timeout, follow_redirects=True, _external=True
+        ) as response:
+            await response.aread()
+            return response
+
+    # -- native Turbine extensions (outside upstream OPERATION_IDS) --------
+    async def get_node_catalog(self, *, timeout: Any = _UNSET) -> NodeCatalog:
+        response = await self.raw_request("GET", node_catalog_url(self.base_url), timeout=timeout)
+        return parse_native_response(
+            response,
+            NodeCatalog,
+            retry_after=_retry_after(response),
+            request_id=_request_id(response),
+        )
+
+    async def get_node_definition(self, class_type: str, *, timeout: Any = _UNSET) -> NodeCatalog:
+        response = await self.raw_request(
+            "GET", node_catalog_url(self.base_url, class_type), timeout=timeout
+        )
+        return parse_native_response(
+            response,
+            NodeCatalog,
+            retry_after=_retry_after(response),
+            request_id=_request_id(response),
+        )
+
+    async def post_prompt_estimate(
+        self, prompt: PromptGraph | dict[str, Any], *, timeout: Any = _UNSET
+    ) -> EstimateReply:
+        body = prepare_estimate(prompt)
+        response = await self.raw_request(
+            "POST", estimate_url(self.base_url), json=body, timeout=timeout
+        )
+        return parse_native_response(
+            response,
+            EstimateReply,
+            retry_after=_retry_after(response),
+            request_id=_request_id(response),
+        )
 
     async def post_assets(
         self,
@@ -1722,7 +1895,7 @@ class AsyncComfyLow:
             headers["Idempotency-Key"] = idempotency_key
         # AsyncClient requires an async-iterable body: build_multipart only ever
         # produces a sync generator (file reads are inherently sync), so bridge
-        # it — see _async_multipart_body — instead of handing httpx a sync
+        # it — see _async_multipart_body — instead of handing httpx2 a sync
         # generator, which raises RuntimeError the moment it tries to send.
         resp = await self.raw_request(
             "POST",
@@ -1775,12 +1948,16 @@ class AsyncComfyLow:
         *,
         range: tuple[int, int] | None = None,
         timeout: Any = _UNSET,
-    ) -> AsyncIterator[httpx.Response]:
+    ) -> AsyncIterator[httpx2.Response]:
         headers: dict[str, str] = {}
         if range is not None:
             headers["Range"] = f"bytes={range[0]}-{range[1]}"
         async with self.open(
-            "GET", f"/assets/{asset_id}/content", headers=headers, timeout=timeout
+            "GET",
+            f"/assets/{asset_id}/content",
+            headers=headers,
+            timeout=timeout,
+            follow_redirects=True,
         ) as resp:
             if resp.status_code not in (200, 206):
                 await resp.aread()
@@ -1796,9 +1973,7 @@ class AsyncComfyLow:
         kw: dict[str, Any] = {}
         if timeout is not _UNSET:
             kw["timeout"] = timeout
-        async with self._client.stream(
-            "GET", url, headers=self._p.headers(url), follow_redirects=False, **kw
-        ) as resp:
+        async with self.open("GET", url, follow_redirects=False, **kw) as resp:
             if resp.has_redirect_location:
                 location = resp.headers["Location"]
                 return location, parse_expiry(location)
@@ -1853,7 +2028,7 @@ class AsyncComfyLow:
         self, job_id_or_url: str, *, timeout: Any = _UNSET
     ) -> AsyncIterator[RawEvent]:
         # Read-idle timeout by default (see the sync get_job_events); a stalled
-        # connection raises so comfy_sdk falls back to poll/reconnect.
+        # connection raises so turbine_sdk falls back to poll/reconnect.
         path = job_id_or_url if _looks_like_path(job_id_or_url) else f"/jobs/{job_id_or_url}/events"
         headers = {"Accept": "text/event-stream"}
         decoder = SSEDecoder()
@@ -1874,7 +2049,7 @@ class AsyncComfyLow:
     async def get_job_workflow(
         self, job_id_or_url: str, *, timeout: Any = _UNSET
     ) -> JobWorkflowResponse:
-        """Async :meth:`ComfyLow.get_job_workflow`."""
+        """Async :meth:`TurbineLow.get_job_workflow`."""
         path = (
             job_id_or_url if _looks_like_path(job_id_or_url) else f"/jobs/{job_id_or_url}/workflow"
         )
@@ -1893,7 +2068,7 @@ class AsyncComfyLow:
         fallback_provider: bool | str | None = None,
         timeout: Any = MODEL_RUN_TIMEOUT,
     ) -> tuple[dict[str, Any] | BinaryResult, Mapping[str, str]]:
-        """Async :meth:`ComfyLow.post_model_run` — same ``dict | BinaryResult`` body."""
+        """Async :meth:`TurbineLow.post_model_run` — same ``dict | BinaryResult`` body."""
         path, body, headers = model_run_request(
             model,
             arguments,
@@ -1902,7 +2077,7 @@ class AsyncComfyLow:
             strict_mode=strict_mode,
             fallback_provider=fallback_provider,
         )
-        url = self._p.router_base_url + path
+        url = self._p.router_url(path)
         resp = await self.raw_request("POST", url, headers=headers, json=body, timeout=timeout)
         return self._p.parse_run_result(resp, (200, 201)), resp.headers
 
@@ -1914,39 +2089,39 @@ class AsyncComfyLow:
         *,
         idempotency_key: str | None = None,
         timeout: Any = _UNSET,
-    ) -> tuple[dict[str, Any], httpx.Headers]:
-        """Async :meth:`ComfyLow.post_model_submit`."""
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
+        """Async :meth:`TurbineLow.post_model_submit`."""
         path, body, headers = model_submit_request(model, arguments, idempotency_key)
-        url = self._p.router_base_url + path
+        url = self._p.router_url(path)
         resp = await self.raw_request("POST", url, headers=headers, json=body, timeout=timeout)
         return self._p.parse_or_raise(resp, (200, 201, 202)), resp.headers
 
     async def get_model_request_status(
         self, model: str, request_id: str, *, timeout: Any = _UNSET
-    ) -> tuple[dict[str, Any], httpx.Headers]:
-        """Async :meth:`ComfyLow.get_model_request_status`."""
-        url = self._p.router_base_url + model_request_path(
-            model, request_id, _MODEL_REQUEST_STATUS_PATH_TEMPLATE
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
+        """Async :meth:`TurbineLow.get_model_request_status`."""
+        url = self._p.router_url(
+            model_request_path(model, request_id, _MODEL_REQUEST_STATUS_PATH_TEMPLATE)
         )
         resp = await self.raw_request("GET", url, timeout=timeout)
         return self._p.parse_or_raise(resp, (200,)), resp.headers
 
     async def get_model_request_result(
         self, model: str, request_id: str, *, timeout: Any = _UNSET
-    ) -> tuple[dict[str, Any] | BinaryResult, httpx.Headers]:
-        """Async :meth:`ComfyLow.get_model_request_result`."""
-        url = self._p.router_base_url + model_request_path(
-            model, request_id, _MODEL_REQUEST_PATH_TEMPLATE
+    ) -> tuple[dict[str, Any] | BinaryResult, httpx2.Headers]:
+        """Async :meth:`TurbineLow.get_model_request_result`."""
+        url = self._p.router_url(
+            model_request_path(model, request_id, _MODEL_REQUEST_PATH_TEMPLATE)
         )
         resp = await self.raw_request("GET", url, timeout=timeout)
         return self._p.parse_run_result(resp, (200,)), resp.headers
 
     async def put_model_request_cancel(
         self, model: str, request_id: str, *, timeout: Any = _UNSET
-    ) -> tuple[dict[str, Any], httpx.Headers]:
-        """Async :meth:`ComfyLow.put_model_request_cancel`."""
-        url = self._p.router_base_url + model_request_path(
-            model, request_id, _MODEL_REQUEST_CANCEL_PATH_TEMPLATE
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
+        """Async :meth:`TurbineLow.put_model_request_cancel`."""
+        url = self._p.router_url(
+            model_request_path(model, request_id, _MODEL_REQUEST_CANCEL_PATH_TEMPLATE)
         )
         resp = await self.raw_request("PUT", url, timeout=timeout)
         return self._p.parse_or_raise(resp, (200, 202, 204)), resp.headers
@@ -1958,9 +2133,9 @@ class AsyncComfyLow:
         cursor: str | None = None,
         limit: int | None = None,
         timeout: Any = DISCOVERY_TIMEOUT,
-    ) -> tuple[dict[str, Any], httpx.Headers]:
-        """Async :meth:`ComfyLow.get_model_catalog`."""
-        url = self._p.router_base_url + model_catalog_path(cursor, limit)
+    ) -> tuple[dict[str, Any], httpx2.Headers]:
+        """Async :meth:`TurbineLow.get_model_catalog`."""
+        url = self._p.router_url(model_catalog_path(cursor, limit))
         resp = await self.raw_request("GET", url, timeout=timeout)
         return self._p.parse_or_raise(resp, (200,)), resp.headers
 
@@ -1970,16 +2145,16 @@ class AsyncComfyLow:
         *,
         etag: str | None = None,
         timeout: Any = DISCOVERY_TIMEOUT,
-    ) -> tuple[dict[str, Any] | None, httpx.Headers]:
-        """Async :meth:`ComfyLow.get_model_schema` — a ``304`` is a ``None`` body."""
-        url = self._p.router_base_url + model_schema_path(model)
+    ) -> tuple[dict[str, Any] | None, httpx2.Headers]:
+        """Async :meth:`TurbineLow.get_model_schema` — a ``304`` is a ``None`` body."""
+        url = self._p.router_url(model_schema_path(model))
         headers = model_schema_headers(etag)
         resp = await self.raw_request("GET", url, headers=headers, timeout=timeout)
         return model_schema_answer(self._p, resp, etag), resp.headers
 
 
 def _looks_like_path(s: str) -> bool:
-    return s.startswith("http") or s.startswith("/")
+    return s.lower().startswith(("http://", "https://")) or s.startswith("/")
 
 
-__all__ = ["ComfyLow", "AsyncComfyLow", "ApiError", "BinaryResult"]
+__all__ = ["TurbineLow", "AsyncTurbineLow", "ApiError", "BinaryResult"]

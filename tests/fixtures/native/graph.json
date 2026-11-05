@@ -1,0 +1,19 @@
+{
+  "10": {
+    "class_type": "core/ASSET",
+    "inputs": {"asset_id": "asset-prepared"},
+    "_meta": {"title": "Already prepared asset"}
+  },
+  "1": {
+    "class_type": "Example",
+    "inputs": {
+      "image": ["10", 0],
+      "text": "hello",
+      "seed": 42,
+      "mode": "balanced",
+      "package_options": {"strength": 0.5, "enabled": true, "optional": null}
+    },
+    "_meta": {"title": "Estimate the exact graph", "color": null},
+    "package_node_metadata": ["preserve", {"order": [3, 1, 2]}]
+  }
+}

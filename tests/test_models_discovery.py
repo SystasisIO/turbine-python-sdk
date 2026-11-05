@@ -2,7 +2,7 @@
 
 Driven against the stub in ``conftest.py`` — ``server.state.catalog_pages`` and
 the ``schema_*`` fields set the scenario, and the fixture points the SDK at the
-stub through ``COMFY_ROUTER_BASE_URL``, exactly as the ``models.run`` tests do.
+stub through the explicit ``router_base_url``, exactly as the ``models.run`` tests do.
 
 What each group here is for:
 
@@ -20,24 +20,23 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
-from comfy_low.transport import DISCOVERY_TIMEOUT
-from comfy_sdk import (
-    ROUTER_BASE_URL_ENV_VAR,
-    AsyncComfy,
+from turbine_low.transport import DISCOVERY_TIMEOUT
+from turbine_sdk import (
     AsyncModelList,
+    AsyncTurbine,
     CatalogModel,
-    Comfy,
     ModelList,
     ModelPage,
     SchemaResult,
+    Turbine,
 )
-from comfy_sdk.exceptions import ComfyError
-from comfy_sdk.models import AsyncModels, Models
-from comfy_sdk.retry import NO_RETRY
-from comfy_sdk.router_exceptions import (
+from turbine_sdk.exceptions import TurbineError
+from turbine_sdk.models import AsyncModels, Models
+from turbine_sdk.retry import NO_RETRY
+from turbine_sdk.router_exceptions import (
     Forbidden,
     InternalError,
     ModelNotFound,
@@ -92,7 +91,7 @@ EXPECTED_IDS = ["bfl/flux-2-pro", "bfl/flux-2-dev", "wan/wan2.5-i2i-preview", "a
 
 def test_list_walks_every_page_following_next_cursor(server) -> None:
     _three_pages(server)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         models = list(client.models.list(limit=2))
     assert [m.id for m in models] == EXPECTED_IDS
     cursors = [q.get("cursor", [None])[0] for q in server.state.catalog_queries]
@@ -102,7 +101,7 @@ def test_list_walks_every_page_following_next_cursor(server) -> None:
 
 async def test_async_list_walks_every_page_following_next_cursor(server) -> None:
     _three_pages(server)
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         models = [m async for m in client.models.list(limit=2)]
     assert [m.id for m in models] == EXPECTED_IDS
     cursors = [q.get("cursor", [None])[0] for q in server.state.catalog_queries]
@@ -110,7 +109,7 @@ async def test_async_list_walks_every_page_following_next_cursor(server) -> None
 
 
 def test_list_entries_expose_id_provider_model_and_billing(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (entry,) = list(client.models.list())
     assert entry == CatalogModel(
         id="bfl/flux-2-pro",
@@ -121,7 +120,7 @@ def test_list_entries_expose_id_provider_model_and_billing(server) -> None:
 
 
 def test_list_is_lazy_and_each_iteration_is_a_fresh_walk(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         catalog = client.models.list()
         assert isinstance(catalog, ModelList)
         assert server.state.catalog_queries == []
@@ -132,13 +131,13 @@ def test_list_is_lazy_and_each_iteration_is_a_fresh_walk(server) -> None:
 
 def test_list_starts_from_the_cursor_given(server) -> None:
     _three_pages(server)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         models = list(client.models.list(cursor="c-2"))
     assert [m.id for m in models] == EXPECTED_IDS[2:]
 
 
 def test_list_sends_no_query_when_nothing_is_set(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         list(client.models.list())
     assert server.state.catalog_queries == [{}]
 
@@ -148,7 +147,7 @@ def test_limit_above_the_maximum_is_passed_through_unchanged(server, limit: int)
     # The route clamps rather than rejects, and reports the size it served —
     # so the SDK sends what it was given and reads the served size back.
     server.state.catalog_pages[None]["limit"] = 100
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         page = client.models.list(limit=limit).page()
     assert server.state.catalog_queries == [{"limit": [str(limit)]}]
     assert page.limit == 100
@@ -156,7 +155,7 @@ def test_limit_above_the_maximum_is_passed_through_unchanged(server, limit: int)
 
 def test_a_has_more_page_without_a_cursor_raises_rather_than_looping(server) -> None:
     server.state.catalog_pages[None].update(has_more=True, next_cursor=None)
-    with Comfy() as client, pytest.raises(ComfyError) as info:
+    with Turbine(router_base_url=server.base_url) as client, pytest.raises(TurbineError) as info:
         list(client.models.list())
     assert info.value.code == "invalid_response"
     assert len(server.state.catalog_queries) == 1
@@ -165,7 +164,7 @@ def test_a_has_more_page_without_a_cursor_raises_rather_than_looping(server) -> 
 def test_a_cursor_cycle_raises_rather_than_looping(server) -> None:
     _three_pages(server)
     server.state.catalog_pages["c-3"].update(has_more=True, next_cursor="c-2")
-    with Comfy() as client, pytest.raises(ComfyError) as info:
+    with Turbine(router_base_url=server.base_url) as client, pytest.raises(TurbineError) as info:
         list(client.models.list())
     assert info.value.code == "invalid_response"
     assert len(server.state.catalog_queries) == 3
@@ -176,7 +175,7 @@ def test_a_cursor_cycle_raises_rather_than_looping(server) -> None:
 
 def test_page_returns_one_page_with_its_paging_facts(server) -> None:
     _three_pages(server)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         page = client.models.list(limit=2).page()
     assert isinstance(page, ModelPage)
     assert [m.id for m in page.data] == EXPECTED_IDS[:2]
@@ -189,7 +188,7 @@ def test_page_returns_one_page_with_its_paging_facts(server) -> None:
 
 async def test_async_page_returns_one_page_with_its_paging_facts(server) -> None:
     _three_pages(server)
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         catalog = client.models.list(cursor="c-3")
         assert isinstance(catalog, AsyncModelList)
         page = await catalog.page()
@@ -202,7 +201,7 @@ async def test_async_page_returns_one_page_with_its_paging_facts(server) -> None
 
 
 def test_schema_returns_the_document_etag_and_request_id(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         result = client.models.schema(MODEL)
     assert result == SchemaResult(
         unchanged=False,
@@ -216,7 +215,7 @@ def test_schema_returns_the_document_etag_and_request_id(server) -> None:
 
 
 async def test_async_schema_returns_the_document(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         result = await client.models.schema(MODEL)
     assert result.unchanged is False
     assert result.document == server.state.schema_document
@@ -224,7 +223,7 @@ async def test_async_schema_returns_the_document(server) -> None:
 
 
 def test_schema_sends_if_none_match_and_a_304_is_unchanged_not_an_error(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         result = client.models.schema(MODEL, etag='"schema-v1"')
     assert server.state.schema_if_none_match == ['"schema-v1"']
     assert result == SchemaResult(
@@ -233,7 +232,7 @@ def test_schema_sends_if_none_match_and_a_304_is_unchanged_not_an_error(server) 
 
 
 async def test_async_schema_304_is_unchanged(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         result = await client.models.schema(MODEL, etag='"schema-v1"')
     assert result.unchanged is True
     assert result.document is None
@@ -243,7 +242,7 @@ async def test_async_schema_304_is_unchanged(server) -> None:
 
 def test_a_stale_etag_gets_the_new_document(server) -> None:
     server.state.schema_etag = '"schema-v2"'
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         result = client.models.schema(MODEL, etag='"schema-v1"')
     assert result.unchanged is False
     assert result.document == server.state.schema_document
@@ -252,27 +251,30 @@ def test_a_stale_etag_gets_the_new_document(server) -> None:
 
 def test_schema_percent_encodes_each_segment(server) -> None:
     server.state.schema_models = {"acme/fast sdxl"}
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.models.schema("acme/fast sdxl")
     assert server.state.schema_paths == ["/v2/models/acme/fast%20sdxl/openapi.json"]
 
 
 @pytest.mark.parametrize("bad", ["bfl", "bfl/flux-2-pro/fp8", "bfl/..", "a//b"])
 def test_schema_rejects_a_malformed_id_before_any_request(server, bad: str) -> None:
-    with Comfy() as client, pytest.raises(ValueError):
+    with Turbine(router_base_url=server.base_url) as client, pytest.raises(ValueError):
         client.models.schema(bad)
     assert server.state.schema_paths == []
 
 
 def test_schema_404_for_an_unknown_model_raises_model_not_found(server) -> None:
-    with Comfy(retry=NO_RETRY) as client, pytest.raises(ModelNotFound) as info:
+    with (
+        Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client,
+        pytest.raises(ModelNotFound) as info,
+    ):
         client.models.schema("bfl/no-such-model")
     assert info.value.http_status == 404
     assert info.value.error_type == "model_not_found"
 
 
 async def test_async_schema_404_for_an_unknown_model_raises_model_not_found(server) -> None:
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(ModelNotFound):
             await client.models.schema("bfl/no-such-model")
 
@@ -294,7 +296,7 @@ def test_discovery_failures_raise_the_typed_router_exception(
 ) -> None:
     server.state.catalog_error = (status, code)
     server.state.schema_error = (status, code)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(cls) as listed:
             list(client.models.list())
         with pytest.raises(cls) as schema:
@@ -305,7 +307,7 @@ def test_discovery_failures_raise_the_typed_router_exception(
 
 async def test_async_list_failure_raises_the_typed_router_exception(server) -> None:
     server.state.catalog_error = (403, "forbidden")
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(Forbidden):
             await client.models.list().page()
 
@@ -313,9 +315,8 @@ async def test_async_list_failure_raises_the_typed_router_exception(server) -> N
 def test_discovery_goes_to_the_router_with_the_clients_credential(
     monkeypatch, server, second_server
 ) -> None:
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, second_server.base_url)
     second_server.state.require_auth = True
-    with Comfy(api_key="k-discover") as client:
+    with Turbine(api_key="k-discover", router_base_url=second_server.base_url) as client:
         list(client.models.list())
         assert second_server.state.last_auth_header == "Bearer k-discover"
         client.models.schema(MODEL)
@@ -330,11 +331,11 @@ def test_discovery_goes_to_the_router_with_the_clients_credential(
 def test_discovery_retries_a_transient_failure_under_the_client_policy(server, monkeypatch) -> None:
     # A 429 naming Retry-After is retried by the default policy, exactly as on
     # every other Router route this namespace owns.
-    import comfy_sdk.model_catalog as catalog
+    import turbine_sdk.model_catalog as catalog
 
     monkeypatch.setattr(catalog.time, "sleep", lambda _s: None)
     server.state.catalog_fail_times = 1
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert len(list(client.models.list())) == 1
     assert len(server.state.catalog_queries) == 2
 
@@ -344,16 +345,16 @@ def test_discovery_retries_a_transient_failure_under_the_client_policy(server, m
 def test_discovery_defaults_to_a_30_second_timeout(cls: type, method: str) -> None:
     default = inspect.signature(getattr(cls, method)).parameters["timeout"].default
     assert default is DISCOVERY_TIMEOUT
-    assert isinstance(default, httpx.Timeout)
+    assert isinstance(default, httpx2.Timeout)
     assert (default.connect, default.read, default.write, default.pool) == (30.0,) * 4
 
 
 def test_a_timeout_reaches_the_request(server, monkeypatch) -> None:
     seen: list[Any] = []
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         real = client._low.raw_request
 
-        def spy(*args: Any, **kwargs: Any) -> httpx.Response:
+        def spy(*args: Any, **kwargs: Any) -> httpx2.Response:
             seen.append(kwargs.get("timeout"))
             return real(*args, **kwargs)
 
@@ -366,15 +367,15 @@ def test_a_timeout_reaches_the_request(server, monkeypatch) -> None:
 def test_a_304_to_an_unconditional_read_is_not_reported_as_unchanged(server) -> None:
     # Only a request that sent If-None-Match can be told "your copy is
     # current"; a caller with no tag has no copy, so a stray 304 must raise.
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         real = client._low.raw_request
 
-        def as_304(*args: Any, **kwargs: Any) -> httpx.Response:
+        def as_304(*args: Any, **kwargs: Any) -> httpx2.Response:
             real(*args, **kwargs)
-            return httpx.Response(304, headers={"ETag": '"x"'})
+            return httpx2.Response(304, headers={"ETag": '"x"'})
 
         client._low.raw_request = as_304  # type: ignore[method-assign]
-        with pytest.raises(ComfyError):
+        with pytest.raises(TurbineError):
             client.models.schema(MODEL)
 
 
@@ -384,7 +385,7 @@ def test_a_304_to_an_unconditional_read_is_not_reported_as_unchanged(server) -> 
 @pytest.mark.parametrize("body", [[], "page", None])
 def test_a_non_object_catalog_page_is_invalid_response(server, body: Any) -> None:
     server.state.catalog_pages[None] = body
-    with Comfy() as client, pytest.raises(ComfyError) as info:
+    with Turbine(router_base_url=server.base_url) as client, pytest.raises(TurbineError) as info:
         client.models.list().page()
     assert info.value.code == "invalid_response"
 
@@ -403,7 +404,7 @@ def test_an_entry_whose_id_does_not_address_its_provider_and_model_is_invalid_re
     server, entry: dict[str, Any]
 ) -> None:
     server.state.catalog_pages[None]["data"] = [entry]
-    with Comfy() as client, pytest.raises(ComfyError) as info:
+    with Turbine(router_base_url=server.base_url) as client, pytest.raises(TurbineError) as info:
         list(client.models.list())
     assert info.value.code == "invalid_response"
 
@@ -412,7 +413,7 @@ def test_the_last_page_never_hands_back_a_cursor(server) -> None:
     # `c-3` is the last page and carries a stale cursor; paging by hand must
     # not be told to follow it.
     _three_pages(server)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         page = client.models.list(cursor="c-3").page()
     assert page.has_more is False
     assert page.next_cursor is None
@@ -420,7 +421,7 @@ def test_the_last_page_never_hands_back_a_cursor(server) -> None:
 
 def test_catalog_entries_are_hashable(server) -> None:
     _three_pages(server)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         models = set(client.models.list())
     assert {m.id for m in models} == set(EXPECTED_IDS)
 
@@ -430,18 +431,21 @@ def test_a_non_object_schema_200_is_invalid_response_not_unchanged(server, docum
     # `None` is how a 304 reaches the SDK, so a 200 carrying JSON `null` must
     # not be read as "your copy is current".
     server.state.schema_document = document
-    with Comfy(retry=NO_RETRY) as client, pytest.raises(ComfyError) as info:
+    with (
+        Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client,
+        pytest.raises(TurbineError) as info,
+    ):
         client.models.schema(MODEL)
     assert info.value.code == "invalid_response"
 
 
 def test_a_304_without_an_etag_keeps_the_tag_that_was_sent(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         real = client._low.raw_request
 
-        def stripped(*args: Any, **kwargs: Any) -> httpx.Response:
+        def stripped(*args: Any, **kwargs: Any) -> httpx2.Response:
             real(*args, **kwargs)
-            return httpx.Response(304)
+            return httpx2.Response(304)
 
         client._low.raw_request = stripped  # type: ignore[method-assign]
         result = client.models.schema(MODEL, etag='"schema-v1"')
@@ -451,13 +455,13 @@ def test_a_304_without_an_etag_keeps_the_tag_that_was_sent(server) -> None:
 
 @pytest.mark.parametrize("bad", ["", '"café"'])
 def test_schema_rejects_an_empty_or_non_ascii_etag_before_any_request(server, bad: str) -> None:
-    with Comfy() as client, pytest.raises(ValueError):
+    with Turbine(router_base_url=server.base_url) as client, pytest.raises(ValueError):
         client.models.schema(MODEL, etag=bad)
     assert server.state.schema_paths == []
 
 
 async def test_async_schema_rejects_an_empty_etag_before_any_request(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         with pytest.raises(ValueError):
             await client.models.schema(MODEL, etag="")
     assert server.state.schema_paths == []
@@ -466,17 +470,17 @@ async def test_async_schema_rejects_an_empty_etag_before_any_request(server) -> 
 def test_discovery_retries_a_read_timeout_under_the_default_policy(server, monkeypatch) -> None:
     # A discovery read carries no key and bills nothing, so the possibly-in-
     # flight class a run needs an opt-in for is retried here by default.
-    import comfy_sdk.model_catalog as catalog
+    import turbine_sdk.model_catalog as catalog
 
     monkeypatch.setattr(catalog.time, "sleep", lambda _s: None)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         real = client._low.raw_request
         calls: list[int] = []
 
-        def flaky(*args: Any, **kwargs: Any) -> httpx.Response:
+        def flaky(*args: Any, **kwargs: Any) -> httpx2.Response:
             calls.append(1)
             if len(calls) == 1:
-                raise httpx.ReadTimeout("slow")
+                raise httpx2.ReadTimeout("slow")
             return real(*args, **kwargs)
 
         client._low.raw_request = flaky  # type: ignore[method-assign]
@@ -485,14 +489,14 @@ def test_discovery_retries_a_read_timeout_under_the_default_policy(server, monke
 
 
 def test_no_retry_still_means_one_discovery_attempt(server) -> None:
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         calls: list[int] = []
 
-        def flaky(*args: Any, **kwargs: Any) -> httpx.Response:
+        def flaky(*args: Any, **kwargs: Any) -> httpx2.Response:
             calls.append(1)
-            raise httpx.ReadTimeout("slow")
+            raise httpx2.ReadTimeout("slow")
 
         client._low.raw_request = flaky  # type: ignore[method-assign]
-        with pytest.raises(httpx.ReadTimeout):
+        with pytest.raises(httpx2.ReadTimeout):
             client.models.schema(MODEL)
     assert len(calls) == 1

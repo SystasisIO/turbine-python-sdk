@@ -14,7 +14,7 @@ position estimate, a client-side retry of a rejected submit, an expiry clock —
 would be a second, disagreeing implementation of a decision that has already
 been made somewhere authoritative.
 
-The shape is deliberately the one :mod:`comfy_sdk.jobs` already uses for
+The shape is deliberately the one :mod:`turbine_sdk.jobs` already uses for
 workflow jobs — submit, hold a handle, poll to a terminal state with adaptive
 backoff, collect or cancel — rather than a second idiom for the same thing. Two
 differences follow from the surface rather than from taste:
@@ -23,7 +23,7 @@ differences follow from the surface rather than from taste:
   reports a failed or cancelled request as ``COMPLETED`` carrying an
   ``error_type``, so a ``200`` is not the same thing as a success. Every path
   that reads a completion runs it through
-  :func:`~comfy_sdk.router_exceptions.error_from_completion` and raises the
+  :func:`~turbine_sdk.router_exceptions.error_from_completion` and raises the
   typed router exception, which is what keeps a failed generation from being
   returned as a result. A status this SDK version has never heard of is treated
   as *not yet terminal* — the set grows on the server's release cycle, and
@@ -44,33 +44,33 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iter
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-import httpx
+import httpx2
 
-from comfy_low.errors import ApiError
-from comfy_low.transport import AsyncComfyLow, BinaryResult, ComfyLow, parse_request_id
+from turbine_low.errors import ApiError
+from turbine_low.transport import AsyncTurbineLow, BinaryResult, TurbineLow, parse_request_id
 
 from . import _core
-from .exceptions import ComfyError, translating
+from .exceptions import TurbineError, translating
 from .retry import DEFAULT_RETRY, NO_RETRY, Retrier, RetryPolicy
 from .router_exceptions import RouterError, error_from_completion
 
 #: The one terminal queue status. Deliberately a single value rather than a
-#: :data:`comfy_sdk._core.TERMINAL`-style set: the server does not express a
+#: :data:`turbine_sdk._core.TERMINAL`-style set: the server does not express a
 #: cancel or a failure as its own status, it expresses them as this status plus
 #: an ``error_type``. Adding "CANCELED" here on the assumption it exists would
 #: strand a caller whose request really did reach ``COMPLETED``.
 COMPLETED = "COMPLETED"
 
 #: Failures a poll is retried through, matching ``models.run``'s tuple exactly.
-#: Being listed is not "retryable" — :meth:`~comfy_sdk.retry.RetryPolicy.should_retry`
+#: Being listed is not "retryable" — :meth:`~turbine_sdk.retry.RetryPolicy.should_retry`
 #: decides that. What it buys is that anything else propagates untouched.
-_CANDIDATE_FAILURES = (ApiError, RouterError, httpx.TransportError)
+_CANDIDATE_FAILURES = (ApiError, RouterError, httpx2.TransportError)
 
 #: What a best-effort cancel is allowed to fail with. Narrow on purpose: this
 #: is only ever used to keep a cancel from masking the ``TimeoutError`` that
 #: prompted it, and swallowing a bare ``Exception`` there would hide a bug in
 #: this SDK just as readily as it hides an unreachable server.
-_CANCEL_FAILURES = (ComfyError, httpx.HTTPError)
+_CANCEL_FAILURES = (TurbineError, httpx2.HTTPError)
 
 #: Ceiling, in seconds, on a server-named ``Retry-After`` between two polls.
 #: The header is honoured because the server knows its own pace, but it is a
@@ -139,11 +139,11 @@ class QueueUpdate:
         )
 
 
-def _retry_after_seconds(headers: httpx.Headers) -> int | None:
+def _retry_after_seconds(headers: httpx2.Headers) -> int | None:
     """``Retry-After`` as a positive whole number of seconds, or ``None``.
 
     Non-positive and unparseable values are dropped rather than honoured, for
-    the reason :class:`~comfy_sdk.retry.Retrier` gives for the same check: a
+    the reason :class:`~turbine_sdk.retry.Retrier` gives for the same check: a
     pace of zero names no pace, and taking it verbatim turns a server that
     keeps answering it into a zero-delay poll loop.
     """
@@ -160,7 +160,7 @@ def _retry_after_seconds(headers: httpx.Headers) -> int | None:
 def _text(value: Any) -> str | None:
     """A body field as a non-empty, stripped string, or ``None``.
 
-    The same reading :func:`~comfy_sdk.router_exceptions.error_from_completion`
+    The same reading :func:`~turbine_sdk.router_exceptions.error_from_completion`
     gives ``error_type``, so an update and the raising path cannot disagree
     about whether a blank bucket is a failure.
     """
@@ -171,7 +171,7 @@ def _text(value: Any) -> str | None:
 
 
 def _update_from(
-    payload: Any, headers: httpx.Headers, *, request_id: str, require_status: bool = False
+    payload: Any, headers: httpx2.Headers, *, request_id: str, require_status: bool = False
 ) -> QueueUpdate:
     """Build a :class:`QueueUpdate` from one response.
 
@@ -188,7 +188,7 @@ def _update_from(
     forever. It stays off for the cancel, whose ``204`` legitimately names none.
     """
     if not isinstance(payload, Mapping):
-        raise ComfyError(
+        raise TurbineError(
             "the queue answered with a body that is not a JSON object, so the request's "
             "state cannot be read from it",
             code="invalid_response",
@@ -197,7 +197,7 @@ def _update_from(
     if not isinstance(status, str):
         status = ""
     if require_status and not status.strip():
-        raise ComfyError(
+        raise TurbineError(
             "the status read answered without naming a status, so the request's state is unknown",
             code="invalid_response",
         )
@@ -215,7 +215,7 @@ def _update_from(
 
 
 def _request_id_of(payload: Any) -> str:
-    """The request id a submit response names, or a :class:`ComfyError`.
+    """The request id a submit response names, or a :class:`TurbineError`.
 
     A submit whose response carries no usable id is unusable in the specific
     way that matters here: the work may well have been accepted and billed, and
@@ -224,14 +224,14 @@ def _request_id_of(payload: Any) -> str:
     would 404 on the first poll.
     """
     if not isinstance(payload, Mapping):
-        raise ComfyError(
+        raise TurbineError(
             "the queue accepted the request but answered with a body that is not a JSON "
             "object, so no request_id could be read from it",
             code="invalid_response",
         )
     request_id = payload.get("request_id")
     if not isinstance(request_id, str) or not request_id:
-        raise ComfyError(
+        raise TurbineError(
             "the queue accepted the request but its response named no request_id, so the "
             "request cannot be polled, collected or cancelled",
             code="invalid_response",
@@ -243,7 +243,7 @@ def _request_id_of(payload: Any) -> str:
         # — and next to the `Idempotency-Key` that can recover the request.
         return parse_request_id(request_id)
     except ValueError as exc:
-        raise ComfyError(
+        raise TurbineError(
             f"the queue named a request_id that cannot address a route: {exc}",
             code="invalid_response",
         ) from exc
@@ -323,7 +323,7 @@ def _completed(update: QueueUpdate | None) -> QueueUpdate:
     middle of collecting a result if that ever stops being true.
     """
     if update is None:  # pragma: no cover - unreachable; see the docstring
-        raise ComfyError(
+        raise TurbineError(
             "the poll loop ended without observing a completion", code="invalid_response"
         )
     return update
@@ -399,7 +399,7 @@ class _RequestHandleBase:
 
 
 class RequestHandle(_RequestHandleBase):
-    """A queued model request on :class:`~comfy_sdk.client.Comfy`.
+    """A queued model request on :class:`~turbine_sdk.client.Turbine`.
 
     Built by ``client.models.submit`` and by ``client.models.handle``; there is
     nothing to construct by hand, and nothing in it that a second process
@@ -408,7 +408,7 @@ class RequestHandle(_RequestHandleBase):
 
     def __init__(
         self,
-        low: ComfyLow,
+        low: TurbineLow,
         model: str,
         request_id: str,
         retry: RetryPolicy = DEFAULT_RETRY,
@@ -423,7 +423,7 @@ class RequestHandle(_RequestHandleBase):
         """Poll the queue once and return what it said.
 
         One request, no waiting — the queued surface's counterpart to
-        :meth:`comfy_sdk.jobs.Job.refresh`. It reports a completion carrying an
+        :meth:`turbine_sdk.jobs.Job.refresh`. It reports a completion carrying an
         ``error_type`` as data on :attr:`QueueUpdate.error_type` rather than
         raising: this is the read a caller uses to *look*, and the raising
         belongs to :meth:`get`, which is the one that hands back a result.
@@ -493,7 +493,7 @@ class RequestHandle(_RequestHandleBase):
         """Wait for the request to complete and return the provider's payload.
 
         The result is a ``dict`` for a model whose partner answers JSON and a
-        :class:`~comfy_sdk.BinaryResult` for one whose partner answers a
+        :class:`~turbine_sdk.BinaryResult` for one whose partner answers a
         generation directly as bytes — the same ``dict | BinaryResult`` branch
         ``models.run`` returns for the same model and arguments, since this
         route's ``200`` declares the identical ``application/json`` / ``*/*``
@@ -504,7 +504,7 @@ class RequestHandle(_RequestHandleBase):
         supported return type.
 
         Raises the typed router exception
-        (:mod:`comfy_sdk.router_exceptions`) when the completion carries an
+        (:mod:`turbine_sdk.router_exceptions`) when the completion carries an
         ``error_type``, which is how the server reports a failed *or* cancelled
         request. ``timeout`` bounds the wait exactly as it does on
         :meth:`iter_events`, the result fetch included, and raises
@@ -515,7 +515,7 @@ class RequestHandle(_RequestHandleBase):
         — costs no more than the first time.
         That holds only while the server still stores the result: once it has
         aged out, the fetch raises
-        :class:`~comfy_sdk.router_exceptions.ResultExpired`, which is permanent
+        :class:`~turbine_sdk.router_exceptions.ResultExpired`, which is permanent
         for that request — submit a new one to run the model again. Under a
         zero-data-retention workspace the result is removed shortly after the
         first collect, so a second collect is not safe to rely on there: keep
@@ -570,7 +570,7 @@ class RequestHandle(_RequestHandleBase):
     def _cancel_best_effort(self) -> None:
         """The cleanup cancel ``models.subscribe`` issues after its own timeout.
 
-        One attempt under :data:`~comfy_sdk.retry.NO_RETRY` and a short HTTP
+        One attempt under :data:`~turbine_sdk.retry.NO_RETRY` and a short HTTP
         bound, because it runs inside the handling of a ``TimeoutError`` the
         caller is about to see: a cancel that rode the client's full retry
         policy could hold that caller for the whole of ``max_elapsed`` — or
@@ -587,11 +587,11 @@ class RequestHandle(_RequestHandleBase):
 
     def _call(
         self,
-        send: Callable[[], tuple[dict[str, Any] | BinaryResult, httpx.Headers]],
+        send: Callable[[], tuple[dict[str, Any] | BinaryResult, httpx2.Headers]],
         *,
         budget: float | None = None,
         policy: RetryPolicy | None = None,
-    ) -> tuple[dict[str, Any] | BinaryResult, httpx.Headers]:
+    ) -> tuple[dict[str, Any] | BinaryResult, httpx2.Headers]:
         """Run one queue call under the client's retry policy.
 
         The same ``Retrier`` ``models.run`` uses, constructed per call because
@@ -614,12 +614,12 @@ class RequestHandle(_RequestHandleBase):
 
 
 class AsyncRequestHandle(_RequestHandleBase):
-    """A queued model request on :class:`~comfy_sdk.client.AsyncComfy` — mirrors
+    """A queued model request on :class:`~turbine_sdk.client.AsyncTurbine` — mirrors
     :class:`RequestHandle`."""
 
     def __init__(
         self,
-        low: AsyncComfyLow,
+        low: AsyncTurbineLow,
         model: str,
         request_id: str,
         retry: RetryPolicy = DEFAULT_RETRY,
@@ -708,11 +708,11 @@ class AsyncRequestHandle(_RequestHandleBase):
 
     async def _call(
         self,
-        send: Callable[[], Awaitable[tuple[dict[str, Any] | BinaryResult, httpx.Headers]]],
+        send: Callable[[], Awaitable[tuple[dict[str, Any] | BinaryResult, httpx2.Headers]]],
         *,
         budget: float | None = None,
         policy: RetryPolicy | None = None,
-    ) -> tuple[dict[str, Any] | BinaryResult, httpx.Headers]:
+    ) -> tuple[dict[str, Any] | BinaryResult, httpx2.Headers]:
         """Async :meth:`RequestHandle._call` — one queue call under the retry policy."""
         retrier = Retrier(_bounded(policy or self._retry, budget), now=_now)
         while True:

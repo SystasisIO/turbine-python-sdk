@@ -33,9 +33,9 @@ import dataclasses
 
 import pytest
 
-from comfy_low.transport import is_json_media_type, media_type
-from comfy_sdk import NO_RETRY, AsyncComfy, BinaryResult, Comfy
-from comfy_sdk.exceptions import ComfyError
+from turbine_low.transport import is_json_media_type, media_type
+from turbine_sdk import NO_RETRY, AsyncTurbine, BinaryResult, Turbine
+from turbine_sdk.exceptions import TurbineError
 
 MODEL = "acme/flux-dev"
 ARGS = {"prompt": "a cat", "steps": 4}
@@ -58,7 +58,7 @@ def _serve_audio(server, content_type: str | None = "audio/mpeg") -> None:
 def test_an_audio_200_returns_the_bytes_verbatim(server) -> None:
     _serve_audio(server)
     server.state.model_run_request_id = "req_audio_01"
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.content == AUDIO
@@ -71,7 +71,7 @@ def test_an_audio_200_returns_the_bytes_verbatim(server) -> None:
 async def test_the_async_client_returns_the_same_binary_result(server) -> None:
     _serve_audio(server)
     server.state.model_run_request_id = "req_audio_01"
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = await client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.content == AUDIO
@@ -83,14 +83,14 @@ def test_a_binary_200_raises_nothing(server) -> None:
     # Stated on its own because the defect was an *exception*, not a wrong
     # value: `pytest.raises` passing elsewhere is not the same assertion.
     _serve_audio(server)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         client.models.run(MODEL, ARGS)  # no exception
 
 
 def test_a_response_with_no_request_id_header_gives_none(server) -> None:
     _serve_audio(server)
     server.state.model_run_request_id = None
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.request_id is None
@@ -101,7 +101,7 @@ def test_a_created_shaped_binary_success_is_also_a_result(server) -> None:
     # type, not on which success status carried it.
     _serve_audio(server)
     server.state.model_run_status = 201
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         assert isinstance(client.models.run(MODEL, ARGS), BinaryResult)
 
 
@@ -124,7 +124,7 @@ def test_a_created_shaped_binary_success_is_also_a_result(server) -> None:
 )
 def test_the_content_type_reaches_the_caller_unchanged(server, content_type: str) -> None:
     _serve_audio(server, content_type)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.content_type == content_type
@@ -141,20 +141,20 @@ def test_a_json_content_type_with_a_charset_is_still_the_dict_branch(server) -> 
     # happily if `media_type` stopped stripping one.
     server.state.model_run_binary_body = b'{"images": [], "seed": 7}'
     server.state.model_run_binary_content_type = "application/json; charset=utf-8"
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert result == {"images": [], "seed": 7}
 
 
 def test_a_content_type_sent_twice_is_still_the_dict_branch(server) -> None:
-    # An intermediary that duplicates `Content-Type` reaches httpx as one
+    # An intermediary that duplicates `Content-Type` reaches httpx2 as one
     # header joined with ", ". Splitting on the semicolon alone read that as a
     # media type of its own, found it was not JSON, and handed a perfectly
     # decodable result back as opaque bytes -- a silent regression for callers
     # who never left the JSON branch.
     server.state.model_run_binary_body = b'{"images": [], "seed": 7}'
     server.state.model_run_binary_content_type = "application/json, application/json"
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert result == {"images": [], "seed": 7}
 
@@ -164,7 +164,7 @@ def test_a_json_suffix_media_type_is_the_dict_branch(server) -> None:
     # vendor media type is still handing back a JSON document.
     server.state.model_run_binary_body = b'{"ok": true}'
     server.state.model_run_binary_content_type = "application/vnd.acme.result+json"
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert result == {"ok": True}
 
@@ -178,8 +178,8 @@ def test_a_json_content_type_whose_body_will_not_parse_is_still_an_error(server)
     # is nothing to hand back. The key still rides out on it.
     server.state.model_run_undecodable_body = True
     server.state.model_run_undecodable_content_type = "application/json"
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.code == "invalid_response"
     assert excinfo.value.http_status == 200
@@ -189,8 +189,8 @@ def test_a_json_content_type_whose_body_will_not_parse_is_still_an_error(server)
 async def test_the_async_json_branch_raises_the_same_way(server) -> None:
     server.state.model_run_undecodable_body = True
     server.state.model_run_undecodable_content_type = "application/json"
-    async with AsyncComfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.models.run(MODEL, ARGS)
     assert excinfo.value.code == "invalid_response"
     assert excinfo.value.idempotency_key is not None
@@ -205,7 +205,7 @@ def test_a_text_html_200_now_comes_back_as_bytes(server) -> None:
     # interstitial or not, reach the caller, who can see what answered.
     server.state.model_run_undecodable_body = True
     server.state.model_run_undecodable_content_type = "text/html"
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.content_type == "text/html"
@@ -219,7 +219,7 @@ def test_no_content_type_and_an_unparseable_body_is_a_binary_result(server) -> N
     # Nothing to branch on, so the body decides — and an empty `content_type`
     # says the response named none rather than naming the wrong one.
     _serve_audio(server, content_type=None)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.content == AUDIO
@@ -231,7 +231,7 @@ def test_no_content_type_but_a_json_body_is_still_a_dict(server) -> None:
     # JSON model must not turn every result into opaque bytes.
     server.state.model_run_binary_body = b'{"images": [], "seed": 7}'
     server.state.model_run_binary_content_type = None
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert result == {"images": [], "seed": 7}
 
@@ -241,7 +241,7 @@ def test_no_content_type_and_an_empty_body_is_still_an_empty_dict(server) -> Non
     # a `BinaryResult` holding zero bytes.
     server.state.model_run_binary_body = b""
     server.state.model_run_binary_content_type = None
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == {}
 
 
@@ -268,7 +268,7 @@ def test_no_content_type_and_a_non_object_body_is_bytes(server, body, descriptio
     # stays total: `json` raises `RecursionError` there, not `ValueError`.
     server.state.model_run_binary_body = body
     server.state.model_run_binary_content_type = None
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult), description
     assert result.content == body
@@ -283,7 +283,7 @@ def test_a_binary_200_with_an_empty_body_is_an_empty_binary_result(server) -> No
     # so it has to actually hold.
     server.state.model_run_binary_body = b""
     server.state.model_run_binary_content_type = "audio/mpeg"
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.content == b""
@@ -297,7 +297,7 @@ def test_a_content_type_carrying_control_bytes_is_filtered(server) -> None:
     # media type itself survives; only what no real one contains is stripped.
     server.state.model_run_binary_body = AUDIO
     server.state.model_run_binary_content_type = "audio/mpeg\x1b[31m; rate=16000"
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert "\x1b" not in result.content_type
@@ -307,7 +307,7 @@ def test_a_content_type_carrying_control_bytes_is_filtered(server) -> None:
 def test_a_long_content_type_is_bounded(server) -> None:
     server.state.model_run_binary_body = AUDIO
     server.state.model_run_binary_content_type = "audio/mpeg; note=" + "x" * 4000
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert len(result.content_type) <= 128
@@ -318,7 +318,7 @@ def test_a_long_content_type_is_bounded(server) -> None:
 
 def test_a_binary_run_still_sends_and_records_an_idempotency_key(server) -> None:
     _serve_audio(server)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         client.models.run(MODEL, ARGS)
     assert server.state.model_run_idempotency_keys[-1]
 
@@ -329,8 +329,8 @@ def test_a_failure_on_the_binary_path_still_carries_the_key(server) -> None:
     # still the caller's handle on a generation they may already owe for.
     _serve_audio(server)
     server.state.model_run_error = (503, "internal_error")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.idempotency_key is not None
     assert excinfo.value.idempotency_key == server.state.model_run_idempotency_keys[0]
@@ -345,8 +345,8 @@ def test_a_replayed_binary_200_is_returned_like_a_first_run(server) -> None:
     _serve_audio(server)
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_replays_lost_result = True
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
         key = excinfo.value.idempotency_key
         assert key is not None
@@ -373,8 +373,8 @@ async def test_the_async_replay_of_a_binary_200_behaves_the_same(server) -> None
     _serve_audio(server)
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_replays_lost_result = True
-    async with AsyncComfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.models.run(MODEL, ARGS)
         key = excinfo.value.idempotency_key
         assert key is not None
@@ -394,7 +394,7 @@ def test_a_retry_that_succeeds_binary_returns_the_bytes(server) -> None:
     server.state.model_run_fail_times = 1
     server.state.model_run_transient_error = (429, "queue_full")
     server.state.model_run_retry_after = "0"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert isinstance(result, BinaryResult)
     assert result.content == AUDIO
@@ -436,15 +436,15 @@ def test_binary_result_is_exported_from_both_layers() -> None:
     # A caller needs the name to write `isinstance(result, BinaryResult)`, so
     # it is part of the public surface rather than an implementation detail of
     # the transport.
-    import comfy_low
-    import comfy_sdk
-    import comfy_sdk.models
+    import turbine_low
+    import turbine_sdk
+    import turbine_sdk.models
 
-    assert comfy_sdk.BinaryResult is BinaryResult
-    assert comfy_sdk.models.BinaryResult is BinaryResult
-    assert comfy_low.BinaryResult is BinaryResult
-    assert "BinaryResult" in comfy_sdk.__all__
-    assert "BinaryResult" in comfy_low.__all__
+    assert turbine_sdk.BinaryResult is BinaryResult
+    assert turbine_sdk.models.BinaryResult is BinaryResult
+    assert turbine_low.BinaryResult is BinaryResult
+    assert "BinaryResult" in turbine_sdk.__all__
+    assert "BinaryResult" in turbine_low.__all__
 
 
 # --- the media-type predicate the branch is built on ----------------------
@@ -458,7 +458,7 @@ def test_binary_result_is_exported_from_both_layers() -> None:
         ("  Application/JSON ;charset=UTF-8", "application/json"),
         ("audio/mpeg", "audio/mpeg"),
         ("audio/L16; rate=16000", "audio/l16"),
-        # `httpx.Headers.get` joins a header sent twice with ", ", so a comma
+        # `httpx2.Headers.get` joins a header sent twice with ", ", so a comma
         # ends the type as surely as a semicolon does.
         ("application/json, application/json", "application/json"),
         ("application/json;charset=utf-8, application/json", "application/json"),

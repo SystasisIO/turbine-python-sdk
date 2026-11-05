@@ -4,12 +4,12 @@ terminal state, download the output.
 
 Skipped unless pointed at a live deployment:
 
-    export COMFY_BASE_URL="https://<dep_id>.stg.run.comfy.app"
-    export COMFY_API_KEY="comfyui-..."
+    export TURBINE_BASE_URL="https://<dep_id>.stg.run.comfy.app"
+    export TURBINE_API_KEY="comfyui-..."
     pytest tests/integration/test_gateway_e2e.py -v
 
 The default workflow uses only core nodes (no models), so any deployment
-works. Point COMFY_WORKFLOW_FILE at an API-format workflow JSON to run your
+works. Point TURBINE_WORKFLOW_FILE at an API-format workflow JSON to run your
 own instead: its first LoadImage node is rewired to the uploaded test input,
 so it must contain one (and its distribution's models must be baked into the
 target deployment).
@@ -31,20 +31,20 @@ from pathlib import Path
 
 import pytest
 
-from comfy_sdk import BASE_URL_ENV_VAR, Comfy, OutputReady, StatusChange
-from comfy_sdk.events import Event
+from turbine_sdk import BASE_URL_ENV_VAR, OutputReady, StatusChange, Turbine
+from turbine_sdk.events import Event
 
 BASE_URL = os.environ.get(BASE_URL_ENV_VAR)
-API_KEY = os.environ.get("COMFY_API_KEY")
+API_KEY = os.environ.get("TURBINE_API_KEY")
 INPUT_NAME = "sdk_e2e_input.png"
-WORKFLOW_FILE = os.environ.get("COMFY_WORKFLOW_FILE")
+WORKFLOW_FILE = os.environ.get("TURBINE_WORKFLOW_FILE")
 JOB_TIMEOUT_S = 600  # cold start on a scale-to-zero deployment takes minutes
 STREAM_CAP_S = 120  # hard wall-clock cap on stream consumption (never hang CI)
 FIRST_FRAME_S = 30  # generous bound on connect-to-first-snapshot (~0.4s live)
 
 pytestmark = pytest.mark.skipif(
     not (BASE_URL and API_KEY),
-    reason="set COMFY_BASE_URL and COMFY_API_KEY to run gateway e2e tests",
+    reason="set TURBINE_BASE_URL and TURBINE_API_KEY to run gateway e2e tests",
 )
 
 
@@ -93,14 +93,14 @@ def _edit_workflow(image_ref: object) -> tuple[dict, str]:
 
 
 @pytest.fixture(scope="module")
-def client() -> Comfy:
-    c = Comfy(api_key=API_KEY)
+def client() -> Turbine:
+    c = Turbine(api_key=API_KEY)
     yield c
     c.close()
 
 
 @pytest.fixture(scope="module")
-def input_asset(client: Comfy, tmp_path_factory: pytest.TempPathFactory):
+def input_asset(client: Turbine, tmp_path_factory: pytest.TempPathFactory):
     path = tmp_path_factory.mktemp("inputs") / INPUT_NAME
     path.write_bytes(_gradient_png())
     asset = client.assets.from_file(path)
@@ -108,12 +108,12 @@ def input_asset(client: Comfy, tmp_path_factory: pytest.TempPathFactory):
     return asset
 
 
-def test_upload_dedup_roundtrip(client: Comfy, input_asset) -> None:
+def test_upload_dedup_roundtrip(client: Turbine, input_asset) -> None:
     again = client.assets.from_bytes(_gradient_png(), filename=INPUT_NAME)
     assert again.commit() == input_asset.commit()
 
 
-def test_image_edit_by_name(client: Comfy, input_asset, tmp_path) -> None:
+def test_image_edit_by_name(client: Turbine, input_asset, tmp_path) -> None:
     graph, _ = _edit_workflow(INPUT_NAME)
     job = client.run(client.workflows.from_json(graph)).wait(timeout=JOB_TIMEOUT_S)
 
@@ -130,7 +130,7 @@ def test_image_edit_by_name(client: Comfy, input_asset, tmp_path) -> None:
         assert (width, height) == (512, 512)
 
 
-def test_stream_delivers_lifecycle(client: Comfy, input_asset) -> None:
+def test_stream_delivers_lifecycle(client: Turbine, input_asset) -> None:
     """SSE conformance: ``job.events()`` delivers the v1 lifecycle live.
 
     The gateway's v1 stream emits ``status`` (snapshot on connect, then on
@@ -190,7 +190,7 @@ def test_stream_delivers_lifecycle(client: Comfy, input_asset) -> None:
     "it resolves string filename references only",
     strict=False,
 )
-def test_image_edit_by_asset_handle(client: Comfy, input_asset, tmp_path) -> None:
+def test_image_edit_by_asset_handle(client: Turbine, input_asset, tmp_path) -> None:
     graph, load_node = _edit_workflow(INPUT_NAME)
     wf = client.workflows.from_json(graph)
     wf.set_input(load_node, "image", input_asset)

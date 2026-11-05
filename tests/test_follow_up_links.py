@@ -12,7 +12,7 @@ against the scheme+authority only. Internal shorthand paths (``/jobs/…``,
 
 from __future__ import annotations
 
-from comfy_low.transport import _Prepared
+from turbine_low.transport import _Prepared
 
 SUBDOMAIN_BASE = "https://dep-123.stg.run.comfy.app"
 PATH_MOUNTED_BASE = "https://proxy.example/deployment/dep_123"

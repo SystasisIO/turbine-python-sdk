@@ -5,14 +5,14 @@ restated here:
 
 * the closed error set it declares as ``x-comfy-error-types`` -- one entry per
   wire value, each with the ``meaning`` prose the exception docstrings
-  reproduce -- compared against :mod:`comfy_sdk.router_exceptions`, both for
+  reproduce -- compared against :mod:`turbine_sdk.router_exceptions`, both for
   the values and their order and, per bucket, for whether that prose has moved
   since its docstring was written;
 * the **route** ``post_model_run`` is bound to -- the path whose
   ``post.operationId`` is ``runRouterModel``, and the ``servers[0].url`` it is
   addressed against -- compared against
-  :data:`comfy_low.transport._MODEL_RUN_PATH_TEMPLATE` and
-  :data:`comfy_sdk.COMFY_ROUTER_BASE_URL` -- and, the same way, the two
+  :data:`turbine_low.transport._MODEL_RUN_PATH_TEMPLATE` and
+  :data:`turbine_sdk.ROUTER_BASE_URL` -- and, the same way, the two
   discovery routes ``models.list()`` / ``models.schema()`` read, by their
   ``get.operationId`` (``listRouterModels``, ``getRouterModelInputSchema``).
 
@@ -36,19 +36,19 @@ from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 import yaml
 
-from comfy_low.transport import (
+from turbine_low.transport import (
     _MODEL_CATALOG_PATH,
     _MODEL_RUN_PATH_TEMPLATE,
     _MODEL_SCHEMA_PATH_TEMPLATE,
+    ROUTER_BASE_URL,
     model_catalog_path,
 )
-from comfy_sdk import COMFY_ROUTER_BASE_URL
-from comfy_sdk.models import RouterRunResult, _run_result
-from comfy_sdk.router_exceptions import (
+from turbine_sdk.models import RouterRunResult, _run_result
+from turbine_sdk.router_exceptions import (
     ROUTER_ERROR_TYPES,
     ROUTER_EXCEPTIONS,
     RouterError,
@@ -199,7 +199,7 @@ def test_every_request_tier_bucket_precedes_every_transport_tier_one() -> None:
         "the spec's x-comfy-error-types no longer declares every `request`-tier bucket "
         f"before every `transport`-tier one: {tiers} -- the flat order comparison in this "
         "file no longer implies the tier split the section comments in "
-        "src/comfy_sdk/router_exceptions.py describe"
+        "src/turbine_sdk/router_exceptions.py describe"
     )
 
 
@@ -226,7 +226,7 @@ def test_every_class_is_blessed_against_the_spec_s_current_meaning(
     # `test_every_declared_bucket_has_a_class`'s job, not this one's.
     assert cls is not RouterError, (
         f"{entry['value']!r} is declared in spec/router-openapi.yaml but has no RouterError "
-        "subclass in src/comfy_sdk/router_exceptions.py -- add it (see "
+        "subclass in src/turbine_sdk/router_exceptions.py -- add it (see "
         "test_every_declared_bucket_has_a_class). Do NOT set _spec_meaning_digest on "
         "RouterError itself: every bucket would inherit the blessing."
     )
@@ -237,7 +237,7 @@ def test_every_class_is_blessed_against_the_spec_s_current_meaning(
     # for prose nobody read.
     assert cls.__dict__.get("_spec_meaning_digest") == expected, (
         f"spec/router-openapi.yaml's `meaning` for {entry['value']!r} is not the prose "
-        f"{cls.__name__}'s docstring in src/comfy_sdk/router_exceptions.py was written "
+        f"{cls.__name__}'s docstring in src/turbine_sdk/router_exceptions.py was written "
         "against -- it changed, or this class was never blessed. Re-read that docstring "
         "against the entry's `meaning` and update it if the semantics moved, then set "
         f'_spec_meaning_digest: str = "{expected}" on the class to record that.'
@@ -264,13 +264,13 @@ def test_run_path_matches_vendored_spec() -> None:
     ]
     assert declared == [_MODEL_RUN_PATH_TEMPLATE], (
         f"the vendored spec declares runRouterModel at {declared} and the SDK posts to "
-        f"{_MODEL_RUN_PATH_TEMPLATE!r} -- update comfy_low.transport._MODEL_RUN_PATH_TEMPLATE"
+        f"{_MODEL_RUN_PATH_TEMPLATE!r} -- update turbine_low.transport._MODEL_RUN_PATH_TEMPLATE"
     )
     servers = doc.get("servers") or []
     declared_host = servers[0].get("url") if servers else None
-    assert declared_host == COMFY_ROUTER_BASE_URL, (
+    assert declared_host == ROUTER_BASE_URL, (
         f"the vendored spec's servers[0].url is {declared_host!r} and the SDK defaults to "
-        f"{COMFY_ROUTER_BASE_URL!r} -- update comfy_low.transport.ROUTER_BASE_URL"
+        f"{ROUTER_BASE_URL!r} -- update turbine_low.transport.ROUTER_BASE_URL"
     )
 
 
@@ -302,7 +302,7 @@ def test_the_discovery_routes_match_the_vendored_spec(
     declared = _declared_get_paths(operation_id)
     assert declared == [bound], (
         f"the vendored spec declares {operation_id} at {declared} and the SDK reads "
-        f"{bound!r} -- update comfy_low.transport.{constant}"
+        f"{bound!r} -- update turbine_low.transport.{constant}"
     )
 
 
@@ -357,7 +357,7 @@ def test_the_run_200_declares_both_a_json_and_a_binary_branch() -> None:
     content = _run_200_content()
     assert set(content) == {"application/json", "*/*"}, (
         f"the vendored spec's runRouterModel 200 declares {sorted(content)}; "
-        "comfy_low.transport._Prepared.parse_run_result branches on exactly two "
+        "turbine_low.transport._Prepared.parse_run_result branches on exactly two "
         "cases (JSON -> dict, anything else -> BinaryResult)"
     )
 
@@ -505,16 +505,16 @@ def test_the_lift_actually_reads_the_declared_name(field: str, header: str, prob
     is a restatement otherwise, and a restatement would pass the sync it exists
     to fail.
 
-    The probe is an ``httpx.Headers`` and not a plain dict because that is what
+    The probe is an ``httpx2.Headers`` and not a plain dict because that is what
     production hands ``_run_result`` -- ``Models.run_detailed`` passes the
     transport's own response headers straight through. A dict's ``.get`` is
-    case-sensitive; ``httpx.Headers`` is not. Probing with a dict would make a
+    case-sensitive; ``httpx2.Headers`` is not. Probing with a dict would make a
     spec sync that only re-cased a declared name fail here even though the SDK
     still reads it correctly, and the only way to get green again would be a
     no-op edit to the source spelling.
     """
-    absent = getattr(_run_result({}, httpx.Headers()), field)
-    present = getattr(_run_result({}, httpx.Headers({header: probe})), field)
+    absent = getattr(_run_result({}, httpx2.Headers()), field)
+    present = getattr(_run_result({}, httpx2.Headers({header: probe})), field)
     assert present != absent, (
         f"_run_result ignored {header!r}: RouterRunResult.{field} read {absent!r} both with "
         f"the header and without it, so the lift is reading some other name."
@@ -590,8 +590,8 @@ def test_an_exempt_field_is_really_unmoved_by_the_headers_it_skips() -> None:
     # and one that moves a field is the finding.
     probes |= {name: "probe" for name in _declared_run_response_headers() - probes.keys()}
 
-    bare = _run_result({}, httpx.Headers())
-    loaded = _run_result({}, httpx.Headers(probes))
+    bare = _run_result({}, httpx2.Headers())
+    loaded = _run_result({}, httpx2.Headers(probes))
     for field in sorted(_NON_HEADER_FIELDS):
         assert getattr(loaded, field) == getattr(bare, field), (
             f"RouterRunResult.{field} is listed in _NON_HEADER_FIELDS as not header-derived, "

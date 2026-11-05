@@ -4,7 +4,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.11', '3.12', '3.13']
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,7 +48,7 @@ jobs:
         run: pytest -v
 
   codegen-drift:
-    name: comfy_low codegen drift
+    name: turbine_low codegen drift
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -67,9 +67,7 @@ jobs:
       - name: Regenerate models and fail on drift
         run: python scripts/check_drift.py
 
-  # NEW -- publish dry run: catches a broken sdist/wheel in PR CI instead of
-  # at actual release time. publish.yml itself stays disabled (if: false);
-  # this job only builds and inspects the artifact, it never uploads it.
+  # Build and inspect artifacts without uploading to a package index.
   build-check:
     name: build-check (publish dry run)
     runs-on: ubuntu-latest
@@ -92,6 +90,20 @@ jobs:
 
       - name: Verify distribution metadata (publish dry run)
         run: twine check dist/*
+
+      - name: Test installed wheel outside checkout
+        shell: bash
+        run: |
+          wheels=(dist/*.whl)
+          pip install "${wheels[0]}[dev]"
+          consumer_dir=$(mktemp -d)
+          cp tests/conftest.py tests/test_public_consumer.py tests/test_shared_schemas.py tests/test_native_extensions.py "$consumer_dir/"
+          cp pyproject.toml "$consumer_dir/"
+          cp -R tests/fixtures "$consumer_dir/fixtures"
+          cd "$consumer_dir"
+          unset PYTHONPATH
+          python -c 'from pathlib import Path; import turbine_sdk; assert "site-packages" in str(Path(turbine_sdk.__file__).resolve())'
+          python -m pytest -q .
 
   # NEW -- regression guard for the internal-reference leak this repo already
   # had once (see scripts/check_public_repo_hygiene.py for what it looks for

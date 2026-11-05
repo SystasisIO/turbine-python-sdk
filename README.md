@@ -1,1206 +1,184 @@
-<div align="center">
-<img src="https://raw.githubusercontent.com/Comfy-Org/comfy-python-sdk/main/assets/logo.svg" alt="Comfy" width="130"/>
-<h1>comfy-python-sdk</h1>
-<p>
-  <strong>The Python client for the <a href="https://docs.comfy.org">Comfy API v2</a>.</strong><br/>
-  Submit a workflow, stream its progress, get your outputs — against self-hosted ComfyUI, Comfy Cloud, or serverless.
-</p>
-</div>
+# turbine-python-sdk
 
-<p align="center">
-  <a href="https://pypi.org/project/comfy-sdk/"><img src="https://img.shields.io/pypi/v/comfy-sdk?style=for-the-badge&logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
-  <a href="#requirements-and-install"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+"></a>
-  <a href="https://github.com/Comfy-Org/comfy-python-sdk/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-lightgrey?style=for-the-badge" alt="License: MIT"></a>
-  <a href="https://cloud.comfy.org"><img src="https://img.shields.io/badge/Comfy_Cloud-cloud.comfy.org-211927?style=for-the-badge" alt="Comfy Cloud"></a>
-</p>
+Python SDK for TurbineOS, derived from the MIT-licensed
+[Comfy Python SDK](https://github.com/Comfy-Org/comfy-python-sdk).
+It preserves Comfy API v2 workflow execution, jobs, assets, outputs and SSE,
+and adds node discovery and prompt cost estimates.
 
----
+Requires **Python 3.11+**. Runtime dependencies: `httpx2`, `blake3`, Pydantic v2.
+See the [adaptation plan](docs/turbine-adaptation-plan.md) and
+[compatibility and verification record](docs/compatibility.md).
 
-Python SDK for running ComfyUI workflows via the **Comfy API v2**. The same
-code runs against Comfy Cloud, a serverless deployment, or a self-hosted
-ComfyUI instance — only the `COMFY_BASE_URL` environment variable and an
-optional API key change.
+## Install
 
-## Requirements and install
-
-Requires **Python 3.10+**. Dependencies: `httpx`, `blake3`, `pydantic` (v2).
+Until a package-index release is configured, install a built wheel or a pinned
+commit from this repository. Distribution name: `turbine-sdk`.
 
 ```bash
-pip install comfy-sdk
+pip install /path/to/turbine_sdk-0.1.0-py3-none-any.whl
+# Developing this repository:
+pip install -e '.[dev]'
 ```
 
-To install from source instead (for local development, or to track an
-unreleased commit):
+Imports are `turbine_sdk` and `turbine_low`; clients are `Turbine` and
+`AsyncTurbine`. There are no compatibility alias packages. The upstream
+`comfy-sdk` can be installed alongside this distribution.
 
-```bash
-git clone https://github.com/Comfy-Org/comfy-python-sdk
-cd comfy-python-sdk
-pip install -e .
-
-# To install everything needed to lint/type-check/test locally
-pip install -e ".[dev]"
-```
-
-### Optional dependencies
-
-Install the optional `pil` extra with `pip install -e ".[pil]"` to use `Preview.to_pil()` for decoding an in-progress output preview to a `PIL.Image`.
-
-### For local
-
-The SDK works against a ComfyUI instance with **Comfy API v2**. Comfy Cloud and serverless instances deployed from our developer platform already use Comfy API v2. For local or self-hosted instances, **Comfy API v2** can be setup using the [comfy-api-proxy](https://github.com/Comfy-Org/comfy-api-proxy).
-
-## Getting started
+## Configuration
 
 ```python
-from comfy_sdk import Comfy
+from turbine_sdk import Turbine
 
-client = Comfy(api_key="comfyui-...")   # Comfy Cloud
-
-wf = client.workflows.from_file("workflow_api.json")
-
-# Input assets are hashed locally with blake3
-# If the server already has an identical copy we reuse it, if not we upload the asset
-# The workflow is updated with the core/ASSET reference instead of a local file path
-asset = client.assets.from_file("photo.png")
-wf.set_input("10", "image", asset)
-
-# Run workflow
-# Get outputs using the output node Id as a reference
-job = client.run(wf)
-for output in job.get_outputs("9"):
-    output.to_file(output.name)
+with Turbine(base_url="http://127.0.0.1:8189", api_key=None) as client:
+    nodes = client.turbine.nodes.list()
 ```
 
-### Constructing a workflow
+| Argument | Resolution |
+| --- | --- |
+| `base_url` | Explicit URL, otherwise `TURBINE_BASE_URL`; required. No Cloud fallback. |
+| `api_key` | Omitted: `TURBINE_API_KEY`; explicit `None`: no SDK bearer token. Explicit empty strings are rejected. |
+| `router_base_url` | Explicit URL only; `None` disables Router. |
+| `client` | Optional `httpx2.Client` / `httpx2.AsyncClient` of the matching kind. |
 
-`client.workflows` builds a `Workflow` from wherever your API-format graph already lives. All three constructors are local — none of them touches the network:
-
-| Constructor | Takes |
-|---|---|
-| `from_file(path)` | a path to a `workflow_api.json` on disk |
-| `from_json(graph)` | a graph already in memory, as a `dict` |
-| `from_str(text)` | the JSON text of a graph |
-
-Callers that assemble the graph in code — a service or a cron with no JSON file to ship alongside it — want `from_json`:
+Invalid explicit URLs are rejected instead of falling back to environment.
+Blank key environment values mean no key. `COMFY_*` variables are not read.
+Router is opt-in and uses this instance's key; select its address and credential
+explicitly. The retained Router catalog is separate from native node discovery.
 
 ```python
-graph = {                                   # API format, same shape as workflow_api.json (abridged)
-    "3": {"class_type": "KSampler", "inputs": {"seed": 0, "steps": 20}},
-    "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0]}},
-}
+import httpx2
+from turbine_sdk import AsyncTurbine
 
-wf = client.workflows.from_json(graph)      # or from_str(json.dumps(graph))
-wf.set_input("3", "seed", 42)               # sugar for graph["3"]["inputs"]["seed"] = 42
-
-job = client.run(wf)
-data = job.get_outputs("9")[0].to_bytes()   # bytes in memory, no file written
+async def discover() -> None:
+    async with httpx2.AsyncClient(timeout=20.0) as http_client:
+        async with AsyncTurbine(
+            base_url="http://127.0.0.1:8189",
+            api_key=None,
+            client=http_client,
+        ) as sdk:
+            await sdk.turbine.nodes.list()
+        # http_client still belongs to this outer context.
 ```
 
-`from_json` wraps the dict you hand it rather than copying, and `wf.json` *is* that graph — still a plain, freely-mutable `dict` if you'd rather edit it directly than go through `set_input`. `AsyncComfy` exposes the same three constructors on `client.workflows`.
+SDK-created clients are closed by the SDK. Supplied clients are not closed or
+mutated globally. Their ordinary timeout is used; stream/Router requests keep
+operation-specific timeouts. Content downloads enable redirects per request;
+signed-URL discovery does not. Credentials are scoped to configured API origins,
+not arbitrary asset URLs. Use HTTPX2 clients and exceptions; HTTPX objects are
+not interchangeable. No global import aliasing is performed.
 
-## Authentication — one client, per-surface key
-
-| Surface | `api_key` |
-|---|---|
-| Comfy Cloud (`https://cloud.comfy.org`) — the default | Required |
-| Serverless deployment | Required |
-| Self-hosted ComfyUI (behind the API proxy) | Omit — no key is sent, even implicitly |
+## Workflow execution
 
 ```python
-client = Comfy(api_key="comfyui-...")   # Comfy Cloud
+from turbine_sdk import Turbine
+
+with Turbine(base_url="http://127.0.0.1:8189", api_key=None) as client:
+    workflow = client.workflows.from_file("workflow_api.json")
+    image = client.assets.from_file("photo.png")
+    workflow.set_input("10", "image", image)
+    job = client.run(workflow)
+    for output in job.get_outputs("9"):
+        output.to_file(output.name)
 ```
 
-`AsyncComfy` takes the same arguments. A key is only ever attached to requests
-aimed at the target deployment's own origin — a server-returned follow-up link
-(`job.urls.self`/`cancel`/`events`, or a redirected asset download) pointing
-anywhere else never receives it.
-
-### Where the key comes from
-
-Each client resolves its credential once, at construction, in a fixed order:
-
-1. the explicit **`api_key=` argument** — it always wins;
-2. the **`COMFY_API_KEY` environment variable**, when no argument was passed;
-3. neither → **`MissingApiKey`**, raised locally against Comfy Cloud, which
-   always requires a key. Nothing is sent, so you find out from the constructor
-   rather than from a `401` on your first call.
-
-```bash
-export COMFY_API_KEY="comfyui-..."
-```
+Workflows can also be constructed with `workflows.from_json(graph)` or
+`workflows.from_str(text)`. Asset handles are uploaded/deduplicated and replaced
+by `core/ASSET` references during submit. `submit(workflow)` returns a Job;
+`run(workflow)` waits for completion. Retained methods include `jobs.get(id)`,
+`list_jobs(...)`, `job.wait()`, `job.cancel()`, `job.get_workflow()`,
+`job.get_outputs(node_id)` and output download helpers.
 
 ```python
-client = Comfy()                        # uses COMFY_API_KEY
-client = Comfy(api_key="comfyui-...")   # this key, whatever the environment says
+from turbine_sdk import AsyncTurbine
+
+async def generate() -> None:
+    async with AsyncTurbine(base_url="http://127.0.0.1:8189", api_key=None) as client:
+        workflow = client.workflows.from_file("workflow_api.json")
+        job = await client.submit(workflow)
+        async for event in job.events():
+            print(event)
+        await job.wait()
+        for output in job.get_outputs("9"):
+            await output.to_file(output.name)
 ```
 
-Both sources are read fresh on every construction (so a process can build
-successive clients under different credentials), and both are trimmed — leading
-and trailing whitespace is stripped, and a blank value counts as *unset*, so
-`COMFY_API_KEY=` in a shell profile and a key read from a file with a trailing
-newline both do the obvious thing.
+SSE reconnect follows the existing v2 behavior; it does not promise replay of
+missed events. GET Job provides authoritative state. A lost submit response
+must not be retried with a newly minted identity. Preserve the original key and
+error context; server-side recovery remains a contract dependency.
 
-Step 3 applies only to Comfy Cloud, recognized by its normalized origin and
-path rather than by the exact string — `https://cloud.comfy.org:443/` is the
-same deployment and gets the same local error. A deployment named by `COMFY_BASE_URL` may
-have no auth at all, so if nothing resolves there the client is built without a
-credential and sends none — the self-hosted row of the table above is unchanged.
-A serverless deployment does require a key, and picks up `COMFY_API_KEY` the
-same way; supply one or the server will answer `401`.
+## Nodes and estimates
 
-The key is write-only from the outside: it is never logged, never rendered by a
-client's `repr()`/`str()` (they report `authenticated=True|False`, never the
-key), and never placed in an exception message. The same holds for a credential
-carried in the base URL itself — `COMFY_BASE_URL=https://user:token@proxy.example`
-reaches a deployment behind an authenticating proxy, and every `repr()` renders
-it as `https://***@proxy.example` while requests still use the URL as given.
+| Method (sync and async) | Server route |
+| --- | --- |
+| `client.turbine.nodes.list()` | `GET /api/object_info` |
+| `client.turbine.nodes.get(class_type)` | `GET /api/object_info/{class_type}` |
+| `client.turbine.estimate_prompt(prompt)` | `POST /api/prompt/estimate` |
 
-`MissingApiKey` is a `ComfyError` like every other SDK exception, and is
-distinct from `Unauthorized` — no key at all, versus a key the server rejected:
+Both node methods return the native mapping from class name to its definition.
+Inputs, widget descriptors, ordering and additional node metadata are preserved.
+These routes share the v2 client's pool and authorization, with native paths.
 
 ```python
-from comfy_sdk import Comfy, MissingApiKey
+from turbine_sdk import Turbine
+from turbine_sdk.schemas import EstimateReply, Money
 
-try:
-    client = Comfy()
-except MissingApiKey as exc:
-    print(exc)   # names COMFY_API_KEY and the api_key= argument
+with Turbine(base_url="http://127.0.0.1:8189", api_key=None) as client:
+    graph = {"1": {"class_type": "ExampleNode", "inputs": {}}}
+    estimate = client.turbine.estimate_prompt(graph)
+    if estimate.total is not None:
+        print(estimate.total.amount, estimate.total.precision, estimate.total.unit)
 ```
 
-The low-level `comfy_low.ComfyLow` transport is unaffected: it takes the key it
-is handed and reads no environment, since resolution is a `comfy_sdk` concern.
-
-### Targeting another deployment
-
-`Comfy()` points at Comfy Cloud and takes no base-URL argument. To run against
-a serverless deployment or a self-hosted instance behind
-[comfy-api-proxy](https://github.com/Comfy-Org/comfy-api-proxy), set
-`COMFY_BASE_URL` in the environment:
-
-```bash
-export COMFY_BASE_URL="https://<deployment>.run.comfy.app"  # serverless
-export COMFY_BASE_URL="http://127.0.0.1:8189"               # self-hosted proxy
-```
-
-It is read each time a client is constructed, must be an `http(s)` URL, and an
-unset or blank value (including whitespace-only) means Comfy Cloud.
-
-`COMFY_BASE_URL` selects the **jobs and assets** surface. `client.models` talks
-to a different one — Comfy Router, `https://api.comfy.org` — and follows its own
-variable, `COMFY_ROUTER_BASE_URL`, with the same rules (read per construction,
-`http(s)` only, blank means the default):
-
-```bash
-export COMFY_ROUTER_BASE_URL="https://api.comfy.org"  # the default; set it to redirect model runs
-```
-
-Two variables rather than one because they are genuinely two hosts: the v2
-surface serves `/api/v2/jobs` and `/api/v2/assets`, Router serves
-`/v2/models/{provider}/{model}`, and neither serves the other's routes. Your
-`COMFY_API_KEY` is the credential for both — the SDK attaches it to those two
-configured origins and to no third one.
-
-Upgrading from an earlier version: `Comfy("<url>", "<key>")` becomes
-`Comfy(api_key="<key>")` with `COMFY_BASE_URL` set. `api_key` is keyword-only,
-so the old positional call raises `TypeError` rather than reading a URL as a
-key.
-
-The SDK identifies itself via a `User-Agent` header (for support and usage
-analytics) — this is request metadata only; no other data is collected. Pass
-`client_info="my-app"` to append an `app/my-app` token so an integration can
-attribute its own traffic:
-
-```python
-client = Comfy(api_key="comfyui-...", client_info="my-app")
-```
-
-## Partner (API) node auth
-
-Workflows that use partner/API nodes (Gemini, etc.) need a Comfy API key to
-authenticate them. Pass it per submit with `api_key=`. This is **not** the same
-as the `api_key` you construct `Comfy` with: the constructor key authenticates
-*you* to the server, while this one authenticates the partner nodes *inside* the
-workflow (it is often the same `comfyui-…` key):
-
-```python
-job = client.run(wf, api_key="comfyui-...")
-# or drive it yourself:
-job = client.submit(wf, api_key="comfyui-...")
-```
-
-The SDK sends it once as `extra_data.api_key_comfy_org` alongside the workflow —
-one key authenticates every partner node in the graph. It is never logged or
-persisted by the SDK. Omit `api_key` and no `extra_data` is sent at all.
-
-## Assets and `core/ASSET`
-
-`client.assets.from_file(...)` / `from_bytes(...)` / `from_stream(...)` /
-`from_url(...)` return a **lazy** asset handle immediately — no network call
-yet. Embed it directly into the workflow graph:
-
-```python
-asset = client.assets.from_file("photo.png")
-wf.set_input("10", "image", asset)
-```
-
-On first use (submitting the workflow, or an explicit `asset.commit()`), the
-SDK:
-
-1. hashes the bytes locally with blake3;
-2. probes the server's dedup fast-path — a `HEAD` existence check by hash,
-   then a cheap `from-hash` mint if the server already has those bytes;
-3. only streams a full multipart upload on a miss.
-
-At submit time, every asset handle found anywhere in the graph is replaced by
-a `core/ASSET` reference object (`{"__type": "core/ASSET", "info": {"id":
-..., "hash": ..., "file_path": ...}}`), which the server resolves back to the
-uploaded asset when it runs the workflow.
-
-Once committed, an asset also carries `job_id` — the id of the job that
-produced it, or `None` for an asset with no producing job (e.g. a plain
-upload) — and `expires_at`, its retention deadline, or `None` if it doesn't
-expire.
-
-An uploaded asset can also hand out a directly-fetchable URL for its bytes —
-`asset.get_download_url()`, the same `DownloadUrl` an output returns (it
-commits first if needed). That is how a local image reaches a service that
-fetches by URL, e.g. an image-to-image model behind Comfy Router — see
-[Image to image — upload an asset first](#image-to-image--upload-an-asset-first).
-
-Delete an asset with `asset.delete()`, or by id alone with
-`client.assets.delete(asset_id)`:
-
-```python
-asset.delete()
-# or, without holding a handle:
-client.assets.delete(asset_id)
-```
-
-Deletion needs a proxy new enough to serve `DELETE /api/v2/assets/{id}` — an
-older [comfy-api-proxy](https://github.com/Comfy-Org/comfy-api-proxy)
-returns `405` instead. (`AsyncAsset.delete()` / `AsyncAssetFactory.delete()`
-mirror both with `await`.)
-
-## Live progress
-
-```python
-job = client.submit(wf)
-for event in job.events():          # SSE; live, auto-reconnecting (no replay)
-    match event:
-        case Progress() as p:       print(f"{p.value:.0%} {p.message}")
-        case Preview() as pv:       show(pv.to_pil())
-        case OutputReady() as o:    o.output.to_file(f"partial/{o.output.name}")
-        case StatusChange(status="succeeded"): break
-result = job.result()               # raises JobFailed with node details on failure
-```
-
-`job.events()` reconnects automatically if the stream drops, but never
-replays a frame you've already seen (the stream carries no cursor). That's
-why polling stays authoritative: `job.wait()` / `job.result()` (and
-`client.run()`, which is `submit()` + `result()`) always fall back to
-`GET /jobs/{id}` to decide when a job is really done — use `events()` for
-live UI feedback, and `wait()`/`result()`/`run()` for the definitive answer.
-`job.status` is the current status string; `job.outputs` is the full list of
-output handles regardless of which node produced them (`job.get_outputs(node_id)`
-filters to one node, as in the quickstart above).
-
-## Getting a job's workflow back
-
-The SDK only holds the workflow it submitted for as long as the originating
-`Job` handle stays alive — for a job rehydrated purely by id
-(`client.jobs.get(job_id)`), `get_workflow()` is the only way to see the
-graph:
-
-```python
-job = client.jobs.get(job_id)
-wf = job.get_workflow()
-match wf.format:
-    case "api":   ...   # the executed graph; frontend-only nodes already resolved away
-    case "save":  ...   # the authoring workflow at the pinned version, canvas layout intact
-```
-
-`format` discriminates the shape of `wf.graph`, so branch on it rather than
-assume one. It depends on how the job was submitted, not on anything a caller
-controls — jobs submitted through this SDK always get `"api"` today, since v2
-submission has no version-pinning fields yet. (`AsyncJob.get_workflow()`
-mirrors this with `await`.)
-
-## Labelling jobs with metadata
-
-Pass `metadata` to `submit()` to store string labels on a job, then find those
-jobs again with `list_jobs()`:
-
-```python
-job = client.submit(wf, metadata={"client": "acme", "batch": "2026-10-05"})
-job.metadata                     # {"client": "acme", "batch": "2026-10-05"}
-
-for summary in client.list_jobs(metadata={"client": "acme"}):
-    print(summary.id, summary.status, summary.metadata)
-```
-
-Labels work on jobs sent to a deployment: point the client at the deployment's
-address with `COMFY_BASE_URL`. There, `list_jobs()` lists that deployment's
-jobs. To list every job in your workspace, across its deployments, set
-`COMFY_BASE_URL` to the workspace address, `https://platformapi.comfy.org`; that
-address serves the job list only, so submit through the deployment's address.
-Elsewhere:
-
-- **A deployment whose gateway predates job labels** accepts `metadata` on
-  `submit()` but does not keep it, and ignores the `list_jobs()` filters, so a
-  filtered `list_jobs()` yields nothing there (the SDK's own filter check, below,
-  drops every job).
-- **Comfy Cloud** refuses labels for now: `submit()` raises a `ComfyError` whose
-  `code` is `"metadata_not_supported"`, and `list_jobs()` raises a `ComfyError`
-  whose `code` is `"not_implemented"` (HTTP 501).
-- **The public demo deployment**, which takes no credential, keeps no labels: a
-  labelled `submit()` raises a `ComfyError` whose `code` is
-  `"metadata_not_supported"` (HTTP 422), and `list_jobs()` raises a `ComfyError`
-  whose `code` is `"public_deployment_no_list"` (HTTP 403, not `Forbidden`).
-- **A self-hosted `comfy-api-proxy`** does not keep labels. Its own job
-  `metadata` is a single string, so it refuses a label map on `submit()` with a
-  `ComfyError` whose `code` is `"invalid_request"`. The SDK reads the proxy's
-  string `metadata` as no labels (`{}`), so a filtered `list_jobs()` yields
-  nothing there, and an unfiltered one yields the proxy's newest jobs (50 by
-  default, up to 100 with `limit`), each with `metadata` `{}`, and stops there
-  since the proxy sends one page and no next cursor. A `limit` over 100 is
-  refused with HTTP 400, a `ComfyError` whose `code` is `"invalid_request"`. Its list items carry `created_at` rather than `create_time`, so
-  `create_time` reads as `None` there (the raw value stays in `data`).
-
-Labels are fixed when the job is submitted. `job.metadata` is an empty dict for a
-job with none. A `metadata` that is not a map of strings reads as `{}`, and a
-value that is not a string is dropped, rather than raising.
-
-`list_jobs()` returns the newest jobs first and keeps only the ones whose labels
-include every key you pass, with exactly that value. It fetches page after page
-until there are no more; on a host that pages, `limit=` sets the page size, not
-a cap on the total (the self-hosted proxy above sends a single page).
-Each item is a `JobSummary` (`id`, `status`, `create_time`, `update_time`,
-`deployment_id`, `metadata`, and `data`, the item as the server sent it); call
-`client.jobs.get(summary.id)` for the full job and its outputs. On `AsyncComfy`, iterate with
-`async for summary in client.list_jobs(...)`. A page answered 429 with
-`Retry-After` is fetched again after that wait (at least one second), the same
-way `submit()` retries.
-
-`list_jobs()` also checks the filters itself: an item whose labels do not include
-every pair you passed is skipped, even if the server sent it. Keys and values are
-compared as the text the query sends, so `metadata={"run": 7}` matches the label
-`"7"`.
-So on a host that ignores the filters, a filtered `list_jobs()` yields only real
-matches. On such a host that pages (a gateway without label support, for
-example), one step of the iteration can read several pages, or every page,
-before it yields or ends.
-
-The server sets the limits on labels and filters, and the SDK does not check
-them first. A map it refuses raises `ComfyError` with `code ==
-"metadata_invalid"` (HTTP 422) and the server's message: it names the key when
-one key or value breaks a rule (a key is 1 to 40 characters from
-`A-Z a-z 0-9 _ - .`; a value is a string of at most 256 bytes in UTF-8 with no
-control or bidirectional formatting characters: U+0000 to U+001F, tab and newline
-included, U+007F to U+009F, and the bidirectional embeddings, overrides and
-isolates U+202A to U+202E and U+2066 to U+2069), and gives the count when there
-are more than 16 pairs. A filter it refuses (more than 3 of them, for example, or a
-value holding one of those characters) raises
-`ComfyError` with `code == "invalid_metadata_filter"`, and a page cursor it did
-not issue raises `ComfyError` with `code == "invalid_cursor"`. A job's
-`deployment_id` names the deployment copy that ran it, so after a deployment
-update it can differ from the deployment's current id.
-
-## Downloading outputs
-
-A finished job exposes its results as `Output` handles — `job.outputs`, or
-`job.get_outputs(node_id)` to filter to one node. Each output is an asset you
-can pull down whichever way suits the caller:
-
-```python
-out = job.get_outputs("13")[0]
-out.to_file("result.png")                   # stream to disk in chunks
-with open("result.bin", "wb") as stream:
-    written = out.to_stream(stream)          # write to an already-open binary stream
-data = out.to_bytes()                       # buffer into memory
-out.to_file("head.png", range=(0, 1023))    # range-aware: first 1 KiB only
-```
-
-Every output also carries `job_id`, the id of the job that produced it — so a
-caller holding just an output can get back to the job that made it.
-
-`get_download_url()` hands back a fetchable URL instead of transferring the
-bytes through your process — give it to a browser, a CDN, or another service:
-
-```python
-link = out.get_download_url()               # DownloadUrl(url=..., expires_at=...)
-```
-
-On Comfy Cloud / serverless the URL is a short-lived, **self-authorizing**
-signed storage URL: whoever holds it can read the asset until `expires_at`
-with no API key of their own. On a self-hosted proxy it's the content endpoint
-(normal auth still applies) and `expires_at` is `None`. It works on every
-backend and never downloads the bytes first.
-
-### Outputs are kind-typed
-
-Outputs aren't assumed to be images. `output.type` is the normalized kind of what the node produced — one of `image`, `video`, `audio`, `text`, `file`, `latent` — and sits alongside `output.content_type` (the exact MIME type), `output.name` and `output.size_bytes`. Branch on it rather than sniffing the filename:
-
-```python
-for out in job.outputs:
-    match out.type:
-        case "image":
-            out.to_file(out.name)                        # stream straight to disk
-        case "audio":
-            transcode(out.to_bytes(), out.content_type)  # bytes in memory, nothing written
-        case "video":
-            enqueue(out.get_download_url().url)          # hand the URL off, transfer nothing
-        case _:
-            print(out.type, out.name, out.size_bytes)
-```
-
-(`AsyncOutput` mirrors all of the above with `await`.)
-
-## The `models` namespace
-
-Model operations live in a namespace on the client you already constructed —
-`client.models` — rather than in a second client object:
-
-```python
-client = Comfy(api_key="comfyui-...")
-
-client.models.base_url   # Comfy Router's base URL, where model runs go
-client.models.timeout    # the client's own HTTP timeout
-```
-
-The namespace is bound to that client's transport, so it uses the client's
-credentials, connection pool and timeout, and a configuration change made on
-the client afterwards applies through `models` as well — there is no second set
-of settings to keep in sync. `AsyncComfy` carries the same `models` namespace,
-and nothing extra is imported or constructed for it:
-`from comfy_sdk import Comfy` stays the only entry point.
-
-The one setting it does **not** share is the target host: `client.models.base_url`
-reports `COMFY_ROUTER_BASE_URL` (`https://api.comfy.org` by default), not the
-client's `COMFY_BASE_URL`. See
-[Targeting another deployment](#targeting-another-deployment) for why they are
-two variables.
-
-`base_url` and `timeout` are a read-only view of that configuration; model
-operations are added to this namespace as they land. There are two ways to run
-a model on it — `run`, which waits, and `submit`, which queues — and they send
-the same request. Two more read-only calls tell you what to run before you run
-it: `list`, the model catalog, and `schema`, one model's input and output
-schemas.
-
-### `models.run` — one call, one result
-
-```python
-result = client.models.run("bfl/flux-2-pro", {"prompt": "a cat", "steps": 4})
-result["images"][0]["url"]
-```
-
-That call is `POST https://api.comfy.org/v2/models/bfl/flux-2-pro` with
-`{"prompt": "a cat", "steps": 4}` as the body.
-
-Three things follow from that, and they are the whole contract of this method:
-
-- **It targets Comfy Router** — `https://api.comfy.org`, redirected by
-  `COMFY_ROUTER_BASE_URL`, not by `COMFY_BASE_URL`. Your API key goes with it.
-- **The first argument is the model's canonical id**, `{provider}/{model}` —
-  exactly the two segments that address the route, and exactly what Router's
-  model catalog lists. It must be two non-empty segments: `"bfl"` alone,
-  `"bfl/flux-2-pro/fp8"` (the three-segment variant form, which this route does
-  not take yet), and anything containing a `.` or `..` segment all raise
-  `ValueError` locally, before any request. A non-string raises `TypeError`.
-- **The second argument is the model's own native input**, forwarded to the
-  provider unchanged. There is no Comfy-shaped envelope around it: whatever the
-  partner's own API documents as the request body is what you pass here, so you
-  can move between the partner's API and Router by changing the host.
-
-`run` returns when the generation is **complete**. There is no submit step and
-nothing to poll: where the platform has to submit-and-poll an upstream
-provider, that happens server side inside this one call. The value you get back
-is the provider's own payload, handed over as-is. For a model that answers
-JSON — most of them — that is a `dict` with no wrapper class between you and
-what the provider produced. For a model whose partner answers a generation
-directly as bytes, it is a `BinaryResult` carrying those bytes unchanged
-alongside the `content_type` and `request_id` that came with them; see "Two
-result shapes" below.
-
-The awaitable form is the **async client**, not a differently-named method:
-
-```python
-async with AsyncComfy(api_key="comfyui-...") as client:
-    result = await client.models.run("bfl/flux-2-pro", {"prompt": "a cat"})
-```
-
-There is no `run_async()`, and there will not be one — one operation, one name,
-and `await` is what makes it asynchronous.
-
-### Two result shapes — JSON, or the model's own bytes
-
-Router forwards the partner's output *under the partner's own media type*, so
-`run` returns one of two things, decided by the response's `Content-Type`:
-
-| The model answers with | You get back | Read it as |
-|---|---|---|
-| a JSON document (`application/json`, or a `+json` type) | `dict` | `result["images"][0]["url"]` |
-| raw bytes under its own media type (`audio/mpeg`, ...) | `BinaryResult` | `result.content`, `result.content_type`, `result.request_id` |
-
-Almost every model in the catalog is the first row, and that shape is unchanged.
-The second row is for a model whose partner answers a generation *directly as a
-file* — the ElevenLabs audio models are the first of these. The bytes come back
-exactly as they arrived: not base64-encoded, not wrapped in a dict, not decoded
-or transcoded. Write them to a file and you have the file the partner produced:
-
-```python
-from pathlib import Path
-
-from comfy_sdk import BinaryResult, Comfy
-
-client = Comfy(api_key="comfyui-...")
-result = client.models.run(
-    "elevenlabs/eleven_v3",
-    {"inputs": [{"text": "Hello from Comfy Router.", "voice_id": "..."}]},
-)
-
-assert isinstance(result, BinaryResult)
-print(result.content_type)          # 'audio/mpeg'
-print(result.request_id)            # the server's X-Comfy-Request-Id, or None
-Path("hello.mp3").write_bytes(result.content)
-```
-
-`BinaryResult` is importable from `comfy_sdk` for exactly this `isinstance`
-check. Which shape a given model returns is in its own contract —
-[`models.schema`](#modelsschema--what-a-model-takes-and-what-it-returns)
-fetches it — whose `200` is `application/json` for a JSON model and `*/*` with
-`format: binary` for a bytes one.
-
-Note `content_type` keeps the header's **parameters**, because for some media
-types the parameters are part of what the bytes are — ElevenLabs' `pcm_*` output
-formats come back as `audio/L16; rate=16000`, and the sample rate is not
-decoration. It is bounded and stripped of unprintable characters first, the way
-every other server-supplied string this SDK hands you is; no real media type
-contains either, so what you get is what was sent. And a `200` whose
-`Content-Type` *claims* JSON but whose body will not parse is still an error
-(`ComfyError`, `code="invalid_response"`), not bytes: there the response
-promised a document and did not deliver one.
-
-A non-JSON `200` reaches you even when it is an intermediary's error page or an
-empty body — this route's `200` means a generation ran and was billed, so the
-SDK will not destroy one it merely finds suspicious. Two checks tell you:
-`result.request_id is None` means no Router answer was seen at all (Router's
-contract marks that header required on every answer it sends, so an HTML
-interstitial from a proxy in front of it has none), and `not result.content`
-means nothing was delivered. Check them before writing `content` to disk.
-
-### `models.list` — what you can run
-
-```python
-from comfy_sdk import Comfy
-
-with Comfy(api_key="comfyui-...") as client:
-    for model in client.models.list():
-        print(model.id, model.billing)
-```
-
-That walks Router's model catalog — `GET https://api.comfy.org/v2/models` —
-page by page, following `next_cursor` while `has_more` is true, and yields one
-`CatalogModel` per entry: `id` (the `{provider}/{model}` id `models.run` takes),
-`provider`, `model`, and `billing` (per-model billing facts such as
-`charges_on_policy_rejection`, never prices). Nothing is fetched until you
-iterate, and each loop is a fresh walk.
-
-For one page and its paging facts instead, call `.page()`:
-
-```python
-page = client.models.list(limit=50).page()
-page.data          # tuple of CatalogModel
-page.has_more      # walk on this, not on a short page
-page.next_cursor   # pass back as list(cursor=...) for the next page
-page.limit         # the page size the server actually served
-page.request_id    # X-Comfy-Request-Id, for a support request
-```
-
-`limit` is sent as given. The server defaults to 20 and clamps anything above
-100 down to 100 rather than rejecting it, so read `page.limit` for the size you
-got. The cursor is opaque and only good for the walk that produced it. On
-`AsyncComfy` it is `async for model in client.models.list():` and
-`await client.models.list().page()`.
-
-### `models.schema` — what a model takes, and what it returns
-
-```python
-with Comfy(api_key="comfyui-...") as client:
-    result = client.models.schema("bfl/flux-2-pro")
-    document = result.document   # the model's own OpenAPI document
-    etag = result.etag           # keep it for the next call
-```
-
-That is `GET https://api.comfy.org/v2/models/bfl/flux-2-pro/openapi.json`: the
-model's input schema (the body `models.run` sends) and its output schema, as a
-standalone OpenAPI document. The id is validated exactly as `models.run`
-validates it, before any request.
-
-Pass a tag you stored earlier to make the read conditional. When the document
-has not changed, the server answers `304` with no body, and you get
-`unchanged=True` back rather than an exception:
-
-```python
-result = client.models.schema("bfl/flux-2-pro", etag=etag)
-if result.unchanged:
-    ...  # your cached document is still current; result.document is None
-else:
-    document, etag = result.document, result.etag
-```
-
-The SDK keeps no cache, so storing the tag and the document is up to you. An
-unknown model raises `ModelNotFound`, and `await client.models.schema(...)` is the
-async form.
-
-Both methods use the same host and credential as `models.run`, raise the same
-typed Router exceptions (see
-[Catching Comfy Router errors](#catching-comfy-router-errors)), and default to
-a 30-second timeout. Pass `timeout=` seconds, an `httpx.Timeout`, or `None` to
-wait indefinitely.
-
-### Image to image — upload an asset first
-
-An image-to-image model takes an image *as input*, and Router forwards the
-model's native body unchanged — so the image goes in whatever form the
-provider documents. Most URL-taking models want a URL the provider can fetch,
-and your local file doesn't have one yet. Give it one by uploading it as an
-asset and handing the model the asset's download URL:
-
-```python
-client = Comfy(api_key="comfyui-...")
-
-# 1. Upload the local image (dedup-aware; a re-run re-uploads nothing) and
-#    resolve a short-lived, self-authorizing signed URL for it.
-asset = client.assets.from_file("photo.png")
-url = asset.get_download_url().url
-
-# 2. Pass that URL wherever the model's own input schema takes an image.
-result = client.models.run(
-    "wan/wan2.5-i2i-preview",
+Estimate accepts **prepared JSON only**, without Asset handles. It sends only
+`{"prompt": graph}` and does not upload files or submit a workflow. To compare
+preview and execution, supply the same prepared graph to both. Equivalence of
+native file inputs and v2 asset references must be established by the server.
+
+The shared schemas are defined once in `turbine_low.models` modules and
+re-exported as the same types from `turbine_sdk.schemas`. They are suitable for
+composition in another Pydantic response model without copying DTO definitions.
+
+```json
+{
+  "total": {"amount": "48", "precision": 0, "unit": "CREDIT"},
+  "nodes": [
     {
-        "input": {"images": [url], "prompt": "Make it golden."},
-        "parameters": {"size": "768*768"},
-    },
-)
-print(result["output"]["results"][0]["url"])
+      "node_id": "1",
+      "model_id": "example-model",
+      "price": {"amount": "48", "precision": 0, "unit": "CREDIT"}
+    }
+  ],
+  "breakdown_complete": true
+}
 ```
 
-`Asset.get_download_url()` commits the asset if needed (hash → dedup probe →
-upload, exactly like submitting it in a workflow) and returns the same
-`DownloadUrl` as an output's `get_download_url()`: on Comfy Cloud / serverless
-a signed storage URL any fetcher can read until `expires_at` (`None` when the
-URL carries no expiry the SDK can read) — which is what lets the provider
-behind Router pull your image without your API key. Mind the two caveats that
-follow from that: the URL is short-lived, so resolve it right before the run
-rather than storing it; and on a *self-hosted* backend the URL is the
-auth-guarded content endpoint, which an external provider cannot fetch — upload
-to Comfy Cloud (the default `COMFY_BASE_URL` surface) for Router inputs.
-
-Some models take images inline instead of by URL — `bfl/flux-2-pro`'s
-`input_image` is base64, for example — and then there is nothing to upload:
-
-```python
-import base64
-from pathlib import Path
-
-image_b64 = base64.b64encode(Path("photo.png").read_bytes()).decode()
-result = client.models.run(
-    "bfl/flux-2-pro",
-    {"prompt": "make it watercolor", "input_image": image_b64},
-)
-```
-
-Which form a model takes is in its input schema —
-`client.models.schema("bfl/flux-2-pro").document` (see
-[`models.schema`](#modelsschema--what-a-model-takes-and-what-it-returns)), or
-the model's page in the
-[Router model catalog](https://docs.comfy.org/development/comfy-router/models).
-
-Because the server may legitimately hold the connection for minutes, `run` uses
-its own 10-minute timeout rather than the client's (which is sized for ordinary
-API calls). Pass `timeout=` seconds, an `httpx.Timeout`, or `None` to wait
-indefinitely. Each call also sends a fresh `Idempotency-Key`, so an accidental
-exact resend is rejected by the server instead of billing a second generation;
-pass `idempotency_key=` to choose the value yourself.
-
-### `models.submit` — queue it, collect it later
-
-`run` holds one connection open until the generation is finished. When the
-caller cannot wait that long — a web request that has to return now, a worker
-that submits in one process and collects in another, a batch that should be in
-flight all at once — submit it to the queue instead:
-
-```python
-handle = client.models.submit("fal-ai/flux-pro", {"prompt": "a cat"})
-
-handle.request_id          # a UUID; with the model id, all another process needs
-handle.status().status     # 'IN_QUEUE' / 'IN_PROGRESS' / 'COMPLETED'
-result = handle.get()      # blocks until complete, returns the provider payload
-```
-
-`submit` sends the same request `run` does — the same model id, the same native
-body — and returns as soon as the server has **accepted** it. The queue is the
-server's: ordering, admission, retries, timeouts, billing and expiry are all
-decided there, and this SDK adds polling and ergonomics on top of it and
-nothing else.
-
-The handle carries four operations:
-
-| | |
-|---|---|
-| `handle.status()` | one authoritative poll, returned as a `QueueUpdate` (`status`, `queue_position`, `error_type`, `retry_after`, `raw`) |
-| `handle.get(timeout=None)` | poll to completion, then return the provider's own payload — the same value `run` would have returned, including the `BinaryResult` branch from "Two result shapes" above |
-| `handle.cancel()` | ask the server to cancel. A request, not a guarantee: a request that already completed stays completed |
-| `handle.iter_events(timeout=None)` | the poll loop with its updates exposed — yields the first observation, every change of status or queue position, and the completion |
-
-Polling is **poll-authoritative**: there is no stream to reconcile against on
-this surface, and `iter_events` is the poll loop rather than SSE. It backs off
-adaptively, and a `Retry-After` the server names on a poll beats that schedule
-— the server knows its own pace.
-
-**A `200` is not the same thing as a success here.** The server reports a
-failed *and* a cancelled request as `COMPLETED` carrying an `error_type`, so
-`get()` raises the matching typed exception from
-[`comfy_sdk.router_exceptions`](#typed-errors) rather than handing the failure
-back as a result. `iter_events` deliberately does not raise — it is a view of
-the queue's progress, and `get()` is the one that collects.
-
-Rehydrate a handle in another process from the two ids that address the
-request, with no call made:
-
-```python
-handle = client.models.handle("fal-ai/flux-pro", request_id)
-result = handle.get()
-```
-
-Both ids are needed because both address the route
-(`/v2/models/{provider}/{model}/requests/{request_id}`), and both are validated
-locally before anything is sent.
-
-### `models.subscribe` — submit, follow, collect
-
-```python
-def on_update(update):
-    print(update.status, update.queue_position)
-
-result = client.models.subscribe(
-    "fal-ai/flux-pro", {"prompt": "a cat"}, on_queue_update=on_update, timeout=300
-)
-```
-
-`submit` + poll + `get`, in one call, for a caller who does want to wait but
-also wants to show progress. `timeout=` is a **client-side** bound with no
-server-side meaning; when it runs out, `subscribe` makes a best-effort
-`cancel()` — so a caller who has stopped waiting is not still paying for a
-generation nobody will collect — and then raises `TimeoutError`. Use `submit`
-when the request should outlive the caller's patience.
-
-Each `submit` **call** mints one fresh `Idempotency-Key`: two deliberate
-submits of the same input are two requests, while a transport-level retry
-inside one call keeps the one key and replays the original rather than queueing
-a second generation. Pass `idempotency_key=` to choose it yourself — the case
-that earns it is a lost response, where the request may have been accepted and
-its id lost with the reply; every exception carries the key on
-`.idempotency_key` for exactly that.
-
-The awaitable form is the async client, with the identical names, arguments and
-argument order — there is no `submit_async`, for the same reason there is no
-`run_async`:
-
-```python
-async with AsyncComfy(api_key="comfyui-...") as client:
-    handle = await client.models.submit("fal-ai/flux-pro", {"prompt": "a cat"})
-    async for update in handle.iter_events():
-        print(update.status)
-    result = await handle.get()
-```
-
-This surface is **gated server side**. A caller the queue is not switched on
-for is answered `403 not_enabled`, which arrives as
-`comfy_sdk.router_exceptions.NotEnabled` — nothing about the request is wrong,
-and it is terminal: do not retry it. The same `403 not_enabled` also refuses a
-*model* whose partner answers a generation directly as bytes: it cannot yet be
-queued, nothing is queued or charged, and `client.models.run` serves it instead —
-so read `.detail` before concluding the account is not switched on.
-
-A caller with too many queued requests already waiting is refused
-`429 queue_backlog_full`, raised as `comfy_sdk.router_exceptions.QueueBacklogFull`.
-It is not `ConcurrencyLimitExceeded` (the synchronous route's in-flight bound):
-the queue parks a submit at that limit, and this is the separate bound on how many
-may be left waiting. It clears as your own queued requests finish.
-
-### Retrying a run without paying for it twice
-
-A failed `models.run` is retried automatically. **Every attempt of one call
-sends the same `Idempotency-Key`**, and a new call mints a new one — that is
-what lets a server tell a retry apart from a second order, on a surface where
-one call is a billed generation.
-
-That one key is also what decides *which* failures are worth retrying. The v2
-jobs contract makes its `Idempotency-Key` **single-use, reject-on-duplicate,
-with no response replay**: the first request to present a key is processed, and
-a later one presenting the same key is rejected `422 idempotency_key_reuse`
-rather than re-run. (That rule governs `submit()`. On the router surface a
-resend of the same key with the same body *collects* the generation the first
-request started instead of dispatching another; a resend with a different body
-is the one that is rejected `422`.) The contract also says when the key is
-released instead of claimed — a request that definitively failed without
-starting work frees its key, while one whose outcome the server could not
-characterise (a 5xx, an upstream timeout) keeps it. Retrying under one key is
-only safe where that key is still spendable, so that is exactly what the default
-policy retries.
-
-The default policy:
-
-| Condition | Behaviour |
-|---|---|
-| Retried | connect-phase transport failures (connection refused, connect timeout, no pooled connection, proxy error) — the request never reached the server, so the key was never claimed |
-| Retried, at the server's pace | a `429` carrying `Retry-After` (queue full, out of credits, a concurrency limit) — a reject that started no work, so the key is released. The delay is the one the server named, not a guess |
-| Retried, at the server's pace | the answers that pace a resend of the *same* key for work already running: a `deadline_exceeded` `504` carrying `Retry-After` (Comfy stopped holding the connection at its own bound; the contract says to retry with the same key, which collects that generation rather than dispatching another), and an in-flight-key `concurrency_limit_exceeded` `409` carrying `Retry-After` (another call is already running under the same key; the resend collects it — the same bucket on a `429` is plain throttling and takes the ordinary retry path). One `run()` rides that loop to the finished result |
-| Not retried | every other 4xx — `400`/`content_policy_violation`, `404`, any `409` that is not the paced in-flight `concurrency_limit_exceeded` one above (`hash_mismatch` carries a `Retry-After` and is still deterministic, and the router's `invalid_input` key cases are answered by a NEW key), `422`, `401`, `402` — because asking again cannot change a deterministic refusal. A `429` with no `Retry-After` is not asking to be asked again either |
-| Not retried by default | anything whose outcome is unknown: any **other 5xx response** — including the router's `service_unavailable` `503` (which asks a caller to retry with backoff but says nothing about the key), a `504` carrying no `Retry-After` (the router sends it only when it holds a generation to collect), and a `504` that is `provider_timeout` rather than `deadline_exceeded` — and a client-side timeout where the server may still be generating. The key stays claimed for these, so a same-key retry only comes back `422 idempotency_key_reuse` (that refusal no longer hides the real error — see below — but it is still a wasted request) — while a fresh-key retry is the second billed generation the one-key rule exists to prevent |
-| Budget | 60 seconds of **total elapsed time** from the first attempt, not a number of attempts. The collect loop gets its own, longer budget: 1200 seconds, two server deadline windows, so it can outlast the deadline that started it |
-| Backoff | 0.5s doubling to a 15s ceiling, with full jitter (each wait is drawn from `[0, ceiling]`), clamped to whatever is left of the budget. A `Retry-After` the server named is used as given instead |
-
-The budget bounds when the *last* attempt may **start**; an attempt already
-running is never interrupted by it, so a slow generation is never abandoned
-half-way. The worst-case wall clock for a call is therefore the budget plus one
-`timeout`.
-
-Tune or disable it per client:
-
-```python
-from comfy_sdk import Comfy, NO_RETRY, RetryPolicy
-
-Comfy(retry=NO_RETRY)                              # exactly one attempt, ever
-Comfy(retry=RetryPolicy(max_elapsed=300.0))        # fast classes: five minutes
-Comfy(retry=RetryPolicy(collect_max_elapsed=60.0)) # bound the collect loop
-Comfy(retry=RetryPolicy(retry_collectable=False))  # raise the 504/409 instead
-
-client.models.retry                                # the policy in force, read-only
-```
-
-There are two budgets because the classes have two shapes. `max_elapsed` governs
-the fast ones — a connect failure, a paced `429` — which resolve in seconds or
-not at all, so an unreachable host gives up in a minute rather than pinning a
-caller (a whole thread, on the sync client) for longer. `collect_max_elapsed`
-governs the collect loop alone, and is twenty minutes because that is the one
-class that has to outlast a *server-side* bound: a `deadline_exceeded` `504`
-arrives at Comfy's own ten-minute deadline, so a single-window budget would
-already be spent when it lands and the collect attempt it exists for would never
-start. Nothing else pays for that room.
-
-A note on what the default trades: the collect rule is
-`spec/router-openapi.yaml`'s, so it binds Comfy Router — but
-`COMFY_ROUTER_BASE_URL` can name a deployment that applies the v2 rule instead
-and keeps the key claimed across the `504`. There the collect resend comes back
-`422 idempotency_key_reuse` — one wasted request, but not a lost diagnosis:
-`run` raises the real `504`, chains the refusal onto it as `__cause__` and sets
-`.resend_refused` on it, so `except IdempotencyKeyReuse` around `run` does *not*
-catch it. Check `.resend_refused` before letting an outer retry wrapper re-enter
-`run()`: a fresh key would start a second billed generation. Set
-`retry_collectable=False` on such a deployment to skip the resend entirely.
-
-Other 5xx responses and client-side timeouts are the cases left out by default,
-and for the same reason. `run` holds the connection open while the server
-generates, so neither one tells you whether the generation happened, and no
-contract says the key survives them — retrying either starts a second generation
-unless the server replays the repeated key rather than re-running it, and
-against a server that *rejects* it instead the retry simply cannot succeed.
-Against a deployment that does replay, opt in:
-
-```python
-Comfy(retry=RetryPolicy(max_elapsed=1200.0, retry_possibly_in_flight=True))
-```
-
-Raise `max_elapsed` when you do: one full-length client timeout on a run spends
-many times the default 60-second budget on its own, leaving no room for the
-retry you just asked for. `collect_max_elapsed` does not help here — that budget
-is the collect class's alone.
-
-`retry` governs `client.models` only. `submit()`/`run()` and `list_jobs()` on
-the client keep their own 429 handling, which follows the server's
-`Retry-After` but waits at least one second, so `Retry-After: 0` cannot drive a
-tight retry loop.
-
-### Collecting a generation after a lost response
-
-Everything above is about the retry the SDK makes *for* you. When it gives up —
-or when you turned it off — the failure that reaches you may still be a
-generation that ran and was billed: a `504` where the server stopped holding the
-connection at its own deadline, or a connection that dropped while it was
-generating. Recovering that generation means asking again under the **same**
-`Idempotency-Key`, and if `run` minted the key for you then that key is the one
-thing you need and the one thing you never saw.
-
-So every exception `models.run` raises carries it:
-
-```python
-import httpx
-from comfy_sdk import Comfy, ComfyError
-
-with Comfy() as client:
-    try:
-        result = client.models.run("acme/flux/dev", {"prompt": "a cat"})
-    # Both, and the second is not optional: a dropped connection or a read
-    # timeout — one of the two cases this section is about — never reached a
-    # response to translate, so it arrives as the `httpx` error it was, not as
-    # a `ComfyError`. Catching only `ComfyError` misses exactly the failure the
-    # replay exists for.
-    except (ComfyError, httpx.HTTPError) as exc:
-        key = exc.idempotency_key
-        if key is None:
-            raise  # Nothing to replay under; a fresh key would re-run and re-bill.
-        # Later — after `exc.retry_after` seconds, if the server named a pace.
-        result = client.models.run(
-            "acme/flux/dev", {"prompt": "a cat"}, idempotency_key=key
-        )
-```
-
-Against a deployment that replays a claimed key, the second call returns the
-original generation's result rather than starting a new one; while that
-generation is still running it is refused instead, with a `Retry-After` saying
-when to ask. Send the same arguments you sent the first time — a repeated key
-with a *different* body is rejected outright.
-
-Three attributes carry this:
-
-| Attribute | Value |
-|---|---|
-| `exc.idempotency_key` | the key that call was made under — the one `run` minted, or the one you passed. Present on every exception `models.run` raises, including a transport failure with no response at all (`httpx.ConnectError`, a read timeout), a cancelled `await`, and a `RouterError` whose `error_type` this SDK version does not recognise |
-| `exc.request_id` | the server's `X-Comfy-Request-Id` for the call, when the response carried one — the id to quote in a support request. `None` when there was no response, or none of that header |
-| `exc.retry_after` | seconds the server asked you to wait before asking again, from `Retry-After`. `None` when it named no pace |
-
-All three read as `None` rather than raising on any exception `models.run`
-raises, so a handler never has to guard the attribute access itself.
-
-`submit()` stamps the key too — on every failure of the `POST /jobs` attempt
-itself, and so on the submit phase of `run()`. A failure raised before the
-request exists (a UI-format workflow, an asset that would not upload) or while
-`run()` polls the job afterwards carries none. What the key is *good for*
-differs, so read it with the surface in mind. `models.run` and `models.submit`
-send it to a surface that **replays** a claimed key, which is what makes it a
-handle on a generation you were already billed for. `POST /jobs` instead
-**rejects** a reused key with `422 idempotency_key_reuse` (see the
-[`IdempotencyKeyReuse`](#typed-errors) bullet below): keys there are single-use
-and there is no replay. So on a `submit()` failure `exc.idempotency_key` is the
-key this attempt was made under, not a replay handle. Whether the server ever
-saw it depends on the failure: a connect failure never delivered it, and an
-exhausted `QueueFull` was refused on every attempt, so the key is unclaimed and
-resubmitting under it is fine. After an ambiguous failure — a read timeout, a
-connection dropped mid-request — poll or list for the job the first attempt may
-already have created rather than resubmitting under it.
-
-`idempotency_key` reads as `None` on every `ComfyError` from other surfaces —
-one that sends no key, and an asset upload, which mints a key per handle without
-recording it. A raw `httpx` error from one of those key-free calls is re-raised
-untouched and does not carry the attribute at all, so a handler that spans
-surfaces reads it with `getattr(exc, "idempotency_key", None)`. Either way
-`None` means "this SDK did not record a key for you", **not** "no key was sent,
-resend freely": check for it before replaying, as the snippet above does, rather
-than passing it straight back into `idempotency_key=` where `None` means "mint a
-fresh one" and starts a second billed generation.
-
-## Sync and async
-
-`Comfy` and `AsyncComfy` expose the identical surface — swap the import and
-add `await` / `async for`:
-
-```python
-from comfy_sdk import AsyncComfy
-
-async def main() -> None:
-    async with AsyncComfy(api_key="comfyui-...") as client:
-        wf = client.workflows.from_file("workflow_api.json")
-        job = await client.run(wf)
-        await job.outputs[0].to_file("out.png")
-        with open("out.bin", "wb") as stream:
-            await job.outputs[0].to_stream(stream)
-```
-
-## Typed errors
-
-`comfy_sdk` translates the API's error envelope into a small set of
-exceptions, all importable from the top-level package and all subclasses of
-`ComfyError`:
-
-Catch these SDK-level exceptions around `Comfy`/`AsyncComfy` methods. Public
-asset, job, event, and output helpers translate protocol errors, so catches of
-`comfy_low.errors.*` belong only around direct low-level transport calls.
-
-- `Unauthorized`, `Forbidden`, `NotFound` — auth and lookup failures.
-- `InvalidWorkflow`, `WorkflowFormatUi` — the graph itself was rejected;
-  `WorkflowFormatUi` specifically means a UI-export (`nodes`/`links`/
-  `last_node_id`) was submitted instead of the API-format graph — the SDK
-  catches this locally before it ever reaches the server.
-- `MissingAsset` — a `core/ASSET` reference could not be resolved.
-- `HashMismatch`, `BlobNotFound` — asset upload/dedup failures.
-- `IdempotencyKeyReuse` — the `Idempotency-Key` was reused. `submit()` (and
-  `run()`) attach a fresh key to every call, so an accidental exact resend never
-  runs the workflow twice. Keys are single-use — reject-on-duplicate, there is
-  no replay — so if you pass your own `idempotency_key=` and reuse it, the second
-  call raises this. After an ambiguous failure (e.g. a timeout where you don't
-  know if the job was created), poll or list your jobs rather than resubmitting
-  with the same key. One exception: when `models.run`'s *own* retry is refused
-  for key reuse, it raises the failure that *claimed the key* and chains this
-  exception onto it as `__cause__` (with `.resend_refused` set on it), since the
-  refusal says nothing about why the call failed. That substitution only happens
-  when a failure that could actually have claimed the key preceded the refusal —
-  after a never-delivered `ConnectError` or a released `429`, a `422` is a
-  genuine refusal of a key spent elsewhere and is raised as itself.
-- `InsufficientCredits` — the account can't afford the job. Shared with the
-  Router surface (see [Catching Comfy Router errors](#catching-comfy-router-errors)),
-  as `Unauthorized` and `Forbidden` are.
-- `QueueFull` — backpressure; carries `.retry_after` seconds. `client.submit`
-  retries 429 responses with `Retry-After` for a bounded budget (including
-  deployment warm-up), then raises the translated error if backpressure remains.
-- `JobFailed` — a job reached a non-`succeeded` terminal state; `.error`
-  carries node-level detail when the platform provided one.
-- A plain `ComfyError` whose `.code` reads `http_<status>` (`http_503`,
-  `http_500`) — the response was answered by something in front of Router
-  rather than by the service itself, so no service verdict was reached: no
-  error envelope, no error bucket, usually no `X-Comfy-Request-Id`. Retry per
-  your own policy; the SDK does not retry these for you. The one line naming
-  the cause (`no healthy upstream`, `upstream connect error or disconnect/reset
-  before headers`) is kept on the protocol-level exception as
-  `comfy_low.errors.ApiError.body_excerpt`, and is what `str()` of the error
-  you catch reads — `HTTP 503: no healthy upstream` — at both layers.
-
-```python
-from comfy_sdk import JobFailed, QueueFull, Unauthorized
-
-try:
-    result = client.run(wf)
-except JobFailed as e:
-    print(e.error)
-except Unauthorized:
-    print("check your api_key")
-```
-
-### Catching Comfy Router errors
-
-`client.models.*` talks to Comfy Router, whose closed error set has its own one
-class per bucket in **`comfy_sdk.router_exceptions`**. Every one of them
-descends from `RouterError`, so the broad catch is one clause:
-
-```python
-from comfy_sdk import RouterError                       # the base — also on the root
-from comfy_sdk.router_exceptions import NotEnabled      # the per-bucket names
-
-try:
-    result = client.models.run("fal-ai/flux-pro", {"prompt": "a cat"})
-except NotEnabled:
-    print("Router is not switched on for this key yet")  # terminal — do not retry
-except RouterError as exc:
-    print(exc.error_type, exc.request_id)                # every other bucket
-```
-
-`RouterError` covers every refusal Router itself answered with, including a
-bucket newer than your installed version — Router names the bucket on every
-error it sends, and that is what types the exception. A response that never
-reached Router carries no bucket to read (an intermediary's HTML `404`, a bare
-`503 no healthy upstream`), so it arrives as a plain `ComfyError` with the
-status on `.http_status`; keep an `except ComfyError` outside the clause above
-if you need to handle those in the same place.
-
-`RouterError` is exported from the package root because it is the handler most
-callers write first. The twenty per-bucket classes stay in
-`comfy_sdk.router_exceptions` — `InvalidInput`, `ContentPolicyViolation`,
-`ProviderError`, `ProviderTimeout`, `InsufficientCredits`, `ModelNotFound`,
-`Unauthorized`, `Forbidden`, `ConcurrencyLimitExceeded`, `ClientDisconnected`,
-`InternalError`, `DeadlineExceeded`, `NotEnabled`, `ServiceUnavailable`,
-`RateLimited`, `Cancelled`, `QueueTimeout`, `RequestNotFound`,
-`QueueBacklogFull`, `ResultExpired` — one import path
-for the whole set rather than half of it here and half of it there. A bucket added to Router after your installed version
-arrives as `RouterError` itself, with the raw value readable on `.error_type`.
-
-Three of those names — `Unauthorized`, `Forbidden`, `InsufficientCredits` —
-are also exported by `comfy_sdk` and `comfy_sdk.exceptions`. **They are the same
-class**, re-exported, not a second one wearing the same name, so
-`except InsufficientCredits` catches the refusal whichever import you wrote. The
-consequence worth knowing is the other direction: because one class cannot
-descend from `RouterError` on one surface and not on the other, a *workflow*
-call that fails `401`/`403`/`402` raises a `RouterError` subclass too, so
-`except RouterError` is slightly wider than its name for exactly those three.
-
-A `cancel()` the server declines raises `AlreadyCompleted` when the request had
-already finished — there was nothing left to stop, and the result is still
-collectable with `handle.get()`. It descends from `CancelRefused`, the base to
-catch when all you want to know is "the cancel did not take"; both are
-`RouterError`s and both are on the package root.
-
-`AlreadyCompleted` is the only refusal shape this version recognises, so
-`except CancelRefused` fires for exactly it today. A refusal this SDK has not
-been taught is a `409` that names no bucket and no code at all — nothing
-identifies it as a refusal — so it stays an untyped `ComfyError` rather than
-being guessed at. Catch `ComfyError` if you need the residue too, and treat the
-next `handle.status()` as authoritative either way: cancelling is a request,
-not a guarantee.
-
-## Architecture — two layers
-
-* **`comfy_low`** — generated protocol bindings. Pydantic v2 models generated
-  from `spec/openapi.yaml` (`src/comfy_low/models/_generated.py`, committed;
-  regenerate with `scripts/gen_models.sh`, CI fails on drift) plus a thin
-  hand-written `httpx` transport (sync + async), one function per `operationId`,
-  with the mandatory escape hatches: raw response access, unbuffered/streaming
-  bodies, all headers, and per-request timeout/abort. Boring and replaceable.
-
-* **`comfy_sdk`** — the idiomatic layer integrators import. This is where the
-  value lives: blake3 content-addressed dedup-upload, `core/ASSET`
-  substitution, idempotent submit, live SSE with reconnect, poll-authoritative
-  `run()`, range-aware downloads, and typed exceptions mapping the error
-  envelope.
-
-`spec/openapi.yaml` is a one-way vendored copy of the canonical Comfy API v2
-contract — do not hand-edit it (see `spec/README.md`). It's synced
-periodically from that canonical contract, stripped of anything tagged
-`internal`, and pinned by `spec/VERSION`.
-
-## Related projects
-
-Clients for the same Comfy API v2 contract:
-
-| Project | Language | Package |
-|---|---|---|
-| [comfy-python-sdk](https://github.com/Comfy-Org/comfy-python-sdk) | Python | `comfy-sdk` |
-| [comfy-typescript-sdk](https://github.com/Comfy-Org/comfy-typescript-sdk) | TypeScript | `@comfyorg/sdk` |
-
-## Development
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the uv-based setup, the full list of
-checks CI requires, and why `src/comfy_low/models/_generated.py` must never be
-hand-edited.
-
-```bash
-pip install -e ".[dev]"
-ruff check .
-ruff format --check .
-mypy src
-pytest -v
-```
-
-Regenerating and checking the vendored protocol layer (a separate CI job):
-
-```bash
-pip install -e ".[codegen]"
-bash scripts/gen_models.sh       # regenerate comfy_low models from spec/openapi.yaml
-python scripts/check_drift.py    # same check CI runs; fails if committed models drifted
-```
-
-## Releases
-
-Releases are published to PyPI from a GitHub Release (tag `vX.Y.Z`) by
-[`.github/workflows/publish.yml`](.github/workflows/publish.yml), using
-PyPI's Trusted Publishing (OIDC) — no API token is stored in this repo.
-
-**Pre-releases** (a release candidate) go out the same way, with one thing to
-get right: the workflow validates the tag as **SemVer**, where a pre-release is
-a `-`-separated segment. So tag it `v0.2.0-rc1` (or `v0.2.0-rc.1`) — **not**
-`v0.2.0rc1`, which is PEP 440's own spelling and is rejected by that check. The
-build normalises the accepted form to the PEP 440 version anyway, so
-`v0.2.0-rc1` produces `comfy_sdk-0.2.0rc1-py3-none-any.whl`, which `pip install
-comfy-sdk` will not pick up without `--pre`. That last part is the point of
-shipping one: a pre-release reaches the people who ask for it and nobody
-else.
+Money amounts are nonnegative integer strings, without float conversion.
+`total` may be null, including when some node prices are known; `model_id` may
+be null. Nullable fields are still required. Unknown estimates are never
+converted to zero. SDK does not apply markup, convert units or authorize spend.
+
+## Errors and optional features
+
+The public exception base is `TurbineError`. Existing typed v2 and Router errors
+retain their meaning; transport failures remain HTTPX2 exceptions. Native
+extension errors preserve HTTP status and safe protocol details. Malformed
+JSON and invalid response shapes are client errors, not successful estimates.
+SDK exceptions and representations must not expose keys.
+
+Router's `models` functionality is retained, but needs an explicit
+`router_base_url` and a credential suitable for that endpoint. Workflow partner
+node credentials remain protocol body fields distinct from the SDK's bearer.
+Optional `pil` installs Pillow for preview decoding. Existing retry policies,
+Router schemas and advanced APIs remain in the source with typed interfaces.
+
+## Development and releases
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Vendored upstream specifications remain
+one-way inputs; generated v2 models must be regenerated with the pinned tool,
+not edited by hand. New native schemas do not modify the upstream v2 operation set.
+
+Package-index publication is disabled. The manual release workflow only builds
+and validates artifacts. Configuring project ownership, verified code owners
+and a Trusted Publisher is a separate maintainer action. MIT attribution and
+upstream provenance are retained in [LICENSE](LICENSE).

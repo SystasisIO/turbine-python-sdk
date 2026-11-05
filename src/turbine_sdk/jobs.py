@@ -16,17 +16,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
-import httpx
+import httpx2
 from pydantic import TypeAdapter, ValidationError
 
-from comfy_low.errors import ApiError
-from comfy_low.models import Job as LowJob
-from comfy_low.models import Output as LowOutput
-from comfy_low.transport import AsyncComfyLow, ComfyLow, job_labels
+from turbine_low.errors import ApiError
+from turbine_low.models import Job as LowJob
+from turbine_low.models import Output as LowOutput
+from turbine_low.transport import AsyncTurbineLow, TurbineLow, job_labels
 
 from . import _core
 from .events import Event, StatusChange, event_from_raw
-from .exceptions import ComfyError, JobFailed, to_sdk_error, translating
+from .exceptions import JobFailed, TurbineError, to_sdk_error, translating
 from .outputs import AsyncOutput, Output
 
 _RECONNECT_PAUSE = 0.1
@@ -74,7 +74,7 @@ def _parse_time(raw: Any) -> datetime | None:
 
 @dataclass(frozen=True, slots=True)
 class JobSummary:
-    """One job as :meth:`comfy_sdk.Comfy.list_jobs` yields it.
+    """One job as :meth:`turbine_sdk.Turbine.list_jobs` yields it.
 
     A list item is a lighter shape than a full job (no outputs, no follow-up
     links), so this is not a :class:`Job` handle. Call
@@ -121,10 +121,10 @@ class JobSummary:
     def _from_item(cls, item: Any) -> JobSummary:
         # Raised rather than skipped: skipping would hide a job from the caller.
         if not isinstance(item, dict):
-            raise ComfyError("job list item is not a JSON object", code="invalid_response")
+            raise TurbineError("job list item is not a JSON object", code="invalid_response")
         missing = [name for name in ("id", "status") if item.get(name) is None]
         if missing:
-            raise ComfyError(
+            raise TurbineError(
                 f"job list item is missing {' and '.join(missing)}", code="invalid_response"
             )
         deployment_id = item.get("deployment_id")
@@ -132,7 +132,7 @@ class JobSummary:
         if deployment_id is not None and not isinstance(deployment_id, str):
             wrong.append("deployment_id")
         if wrong:
-            raise ComfyError(
+            raise TurbineError(
                 f"job list item has a non-string {' and '.join(wrong)}", code="invalid_response"
             )
         return cls(
@@ -149,7 +149,7 @@ class JobSummary:
 class Job:
     """Synchronous job handle."""
 
-    def __init__(self, low: ComfyLow, model: LowJob) -> None:
+    def __init__(self, low: TurbineLow, model: LowJob) -> None:
         self._low = low
         self._model = model
 
@@ -243,7 +243,7 @@ class Job:
         ``client.jobs.get``) — the SDK only holds the workflow it submitted
         for as long as the same process's :class:`Job` handle is alive, so
         this is the only way to see the graph otherwise. A missing job raises
-        the SDK's normal :class:`~comfy_sdk.exceptions.NotFound`.
+        the SDK's normal :class:`~turbine_sdk.exceptions.NotFound`.
         """
         with translating():
             data = self._low.get_job_workflow(self._model.id)
@@ -275,7 +275,7 @@ class Job:
                 if exc.http_status == 501:
                     return  # surface has no SSE — poll paths remain authoritative
                 raise to_sdk_error(exc) from exc
-            except (httpx.HTTPError, httpx.StreamError):
+            except (httpx2.HTTPError, httpx2.StreamError):
                 pass  # connection dropped mid-stream — reconnect below
             if terminal_seen:
                 return
@@ -294,7 +294,7 @@ class Job:
 class AsyncJob:
     """Asynchronous job handle — mirrors :class:`Job`."""
 
-    def __init__(self, low: AsyncComfyLow, model: LowJob) -> None:
+    def __init__(self, low: AsyncTurbineLow, model: LowJob) -> None:
         self._low = low
         self._model = model
 
@@ -392,7 +392,7 @@ class AsyncJob:
                 if exc.http_status == 501:
                     return  # surface has no SSE — poll paths remain authoritative
                 raise to_sdk_error(exc) from exc
-            except (httpx.HTTPError, httpx.StreamError):
+            except (httpx2.HTTPError, httpx2.StreamError):
                 pass
             if terminal_seen:
                 return
@@ -409,7 +409,7 @@ class AsyncJob:
 class JobFactory:
     """``client.jobs`` — rehydrate a :class:`Job` from its ID."""
 
-    def __init__(self, low: ComfyLow) -> None:
+    def __init__(self, low: TurbineLow) -> None:
         self._low = low
 
     def get(self, job_id: str) -> Job:
@@ -418,7 +418,7 @@ class JobFactory:
 
 
 class AsyncJobFactory:
-    def __init__(self, low: AsyncComfyLow) -> None:
+    def __init__(self, low: AsyncTurbineLow) -> None:
         self._low = low
 
     async def get(self, job_id: str) -> AsyncJob:

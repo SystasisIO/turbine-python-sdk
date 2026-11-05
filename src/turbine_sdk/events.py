@@ -1,6 +1,6 @@
 """Typed, ``match``/``case``-able streamed events.
 
-The raw SSE frames from ``comfy_low`` (``event`` name + ``data`` dict) are lifted
+The raw SSE frames from ``turbine_low`` (``event`` name + ``data`` dict) are lifted
 into a small closed set of dataclasses so callers can pattern-match:
 
     for event in job.events():
@@ -18,8 +18,8 @@ import base64
 from dataclasses import dataclass
 from typing import Any
 
-from comfy_low.models import Output as LowOutput
-from comfy_low.sse import RawEvent
+from turbine_low.models import Output as LowOutput
+from turbine_low.sse import RawEvent
 
 from .outputs import AsyncOutput, Output
 

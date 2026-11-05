@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import time
 
-import httpx
+import httpx2
 
-from comfy_low import transport
-from comfy_sdk import AsyncComfy, Comfy, Progress, StatusChange
+from turbine_low import transport
+from turbine_sdk import AsyncTurbine, Progress, StatusChange, Turbine
 
 
 def _wf(client):
@@ -18,13 +18,13 @@ def _wf(client):
 
 def test_events_recovers_from_zombie_stream(server, monkeypatch) -> None:
     # Short read-idle timeout so the stalled stream trips it quickly.
-    monkeypatch.setattr(transport, "_SSE_IDLE_TIMEOUT", httpx.Timeout(5.0, read=0.3))
+    monkeypatch.setattr(transport, "_SSE_IDLE_TIMEOUT", httpx2.Timeout(5.0, read=0.3))
     server.state.sse_mode = "stall"
     # Socket held open + silent, well past the 0.3s read timeout.
     server.state.stall_seconds = 3.0
     server.state.polls_to_succeed = 1  # poll fallback sees terminal immediately
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         t0 = time.monotonic()
         seen = list(job.events())  # MUST NOT hang
@@ -41,12 +41,12 @@ def test_events_recovers_from_zombie_stream(server, monkeypatch) -> None:
 
 async def test_async_events_recovers_from_zombie_stream(server, monkeypatch) -> None:
     # The async path uses the same idle timeout + poll fallback — must also recover.
-    monkeypatch.setattr(transport, "_SSE_IDLE_TIMEOUT", httpx.Timeout(5.0, read=0.3))
+    monkeypatch.setattr(transport, "_SSE_IDLE_TIMEOUT", httpx2.Timeout(5.0, read=0.3))
     server.state.sse_mode = "stall"
     server.state.stall_seconds = 3.0
     server.state.polls_to_succeed = 1
 
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         t0 = time.monotonic()
         seen = [e async for e in job.events()]  # MUST NOT hang
@@ -61,11 +61,11 @@ async def test_async_events_recovers_from_zombie_stream(server, monkeypatch) -> 
 def test_get_job_events_timeout_none_opts_out_of_idle_timeout(server, monkeypatch) -> None:
     # The documented escape hatch: timeout=None disables the idle timeout, so the
     # raw iterator rides out the stall until the socket closes rather than raising.
-    monkeypatch.setattr(transport, "_SSE_IDLE_TIMEOUT", httpx.Timeout(5.0, read=0.05))
+    monkeypatch.setattr(transport, "_SSE_IDLE_TIMEOUT", httpx2.Timeout(5.0, read=0.05))
     server.state.sse_mode = "stall"
     server.state.stall_seconds = 0.8  # held open, then the stub closes
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         events_url = job._model.urls.events
         t0 = time.monotonic()

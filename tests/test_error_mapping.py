@@ -7,11 +7,11 @@ which statuses may be decoded to a typed code when the response named none.
 
 from __future__ import annotations
 
-import httpx
+import httpx2
 import pytest
 
-import comfy_low.transport as low_transport
-from comfy_low.errors import (
+import turbine_low.transport as low_transport
+from turbine_low.errors import (
     ApiError,
     HashMismatch,
     QueueFull,
@@ -19,10 +19,10 @@ from comfy_low.errors import (
     clean_body_excerpt,
     error_from_envelope,
 )
-from comfy_sdk.exceptions import ComfyError, NotFound, to_sdk_error
-from comfy_sdk.exceptions import HashMismatch as SdkHashMismatch
-from comfy_sdk.exceptions import Unauthorized as SdkUnauthorized
-from comfy_sdk.retry import RetryPolicy, error_bucket_of, is_collectable
+from turbine_sdk.exceptions import HashMismatch as SdkHashMismatch
+from turbine_sdk.exceptions import NotFound, TurbineError, to_sdk_error
+from turbine_sdk.exceptions import Unauthorized as SdkUnauthorized
+from turbine_sdk.retry import RetryPolicy, error_bucket_of, is_collectable
 
 
 @pytest.mark.parametrize("code", ["not_found", "job_not_found", "asset_not_found"])
@@ -39,7 +39,7 @@ def test_404_codes_map_to_notfound(code: str) -> None:
 # `POST /v2/models/{provider}/{model}` is Router's own route, whose error body is
 # `{detail, error_type}` with the coarse bucket repeated on `X-Comfy-Error-Type`
 # -- not the v2 `{error: {code, message}}` envelope every other route answers in.
-# `error_from_envelope` has to read both, because `comfy_sdk.retry` keys its
+# `error_from_envelope` has to read both, because `turbine_sdk.retry` keys its
 # default-on collect rule on that bucket and would otherwise be a silent no-op
 # against every real Router 504.
 
@@ -95,7 +95,7 @@ def test_a_router_bucket_outranks_the_status_table_on_every_status(
     # never fired.
     err = error_from_envelope(status, None, error_type=bucket, retry_after=3)
     assert err.code == bucket
-    # The pace survives regardless of the code: `comfy_sdk.retry` keys the
+    # The pace survives regardless of the code: `turbine_sdk.retry` keys the
     # 429 branch on status + Retry-After, not on `queue_full`.
     assert err.retry_after == 3
 
@@ -132,7 +132,7 @@ def test_a_bucketless_409_is_not_guessed_to_be_a_hash_mismatch() -> None:
     # status cannot be guessed: it is a distinct action, not a vaguer wording
     # of the same one.
     sdk_err = to_sdk_error(err)
-    assert type(sdk_err) is ComfyError
+    assert type(sdk_err) is TurbineError
     assert not isinstance(sdk_err, SdkHashMismatch)
     assert sdk_err.http_status == 409
 
@@ -286,7 +286,7 @@ def test_a_body_that_names_no_bucket_still_falls_back_to_the_status(body: object
 def test_a_router_only_bucket_raises_its_typed_class(
     bucket: str, status: int, cls_name: str
 ) -> None:
-    import comfy_sdk.router_exceptions as rx
+    import turbine_sdk.router_exceptions as rx
 
     err = to_sdk_error(ApiError("router said no", code=bucket, http_status=status, retry_after=7))
     assert type(err) is getattr(rx, cls_name)
@@ -301,7 +301,7 @@ def test_a_bucket_both_surfaces_spell_keeps_its_v2_class(code: str) -> None:
     # Router, and the code string alone cannot say which surface answered.
     # Retyping them to the RouterError twins would break every jobs-surface
     # handler to fix none -- the v2 classes fire on the router surface too.
-    import comfy_sdk.exceptions as sdk
+    import turbine_sdk.exceptions as sdk
 
     err = to_sdk_error(ApiError("no", code=code, http_status=403))
     assert type(err) is getattr(sdk, "".join(p.title() for p in code.split("_")))
@@ -433,7 +433,7 @@ def test_leading_whitespace_beyond_the_examined_window_still_yields_the_words() 
 # --- what the transport actually passes at the raise site ---
 
 
-def _raised_by_transport(resp: httpx.Response) -> ApiError:
+def _raised_by_transport(resp: httpx2.Response) -> ApiError:
     """The exception ``parse_or_raise`` builds for ``resp``.
 
     Driven through the real raise site rather than through
@@ -448,7 +448,7 @@ def _raised_by_transport(resp: httpx.Response) -> ApiError:
 
 
 def test_the_transport_keeps_the_text_of_a_load_balancers_503() -> None:
-    err = _raised_by_transport(httpx.Response(503, text="no healthy upstream"))
+    err = _raised_by_transport(httpx2.Response(503, text="no healthy upstream"))
     assert err.code == "http_503"
     assert err.body_excerpt == "no healthy upstream"
     assert str(err) == "HTTP 503: no healthy upstream"
@@ -456,7 +456,7 @@ def test_the_transport_keeps_the_text_of_a_load_balancers_503() -> None:
 
 def test_the_transport_keeps_no_excerpt_when_the_body_was_an_envelope() -> None:
     err = _raised_by_transport(
-        httpx.Response(429, json={"error": {"code": "queue_full", "message": "full"}})
+        httpx2.Response(429, json={"error": {"code": "queue_full", "message": "full"}})
     )
     assert err.code == "queue_full"
     assert err.body_excerpt is None
@@ -465,7 +465,7 @@ def test_the_transport_keeps_no_excerpt_when_the_body_was_an_envelope() -> None:
 def test_a_json_body_that_is_not_an_object_still_yields_an_excerpt() -> None:
     # `resp.json()` succeeds and returns a list; nothing in it is an envelope,
     # so the text is still the only statement of the cause.
-    err = _raised_by_transport(httpx.Response(500, json=["upstream refused"]))
+    err = _raised_by_transport(httpx2.Response(500, json=["upstream refused"]))
     assert err.code == "http_500"
     assert err.body_excerpt == '["upstream refused"]'
 
@@ -476,7 +476,7 @@ def test_a_json_object_that_is_not_an_envelope_still_yields_an_excerpt() -> None
     # treated as an envelope on that basis alone, losing the one line that named
     # the cause. The gate is whether a message was read, not whether the body
     # parsed as an object.
-    err = _raised_by_transport(httpx.Response(503, text='{"message": "no healthy upstream"}'))
+    err = _raised_by_transport(httpx2.Response(503, text='{"message": "no healthy upstream"}'))
     assert err.code == "http_503"
     assert err.body_excerpt == '{"message": "no healthy upstream"}'
     assert str(err) == 'HTTP 503: {"message": "no healthy upstream"}'
@@ -487,7 +487,7 @@ def test_a_non_string_envelope_message_cannot_break_str() -> None:
     # string must degrade to the synthetic message, not raise `TypeError:
     # __str__ returned non-string` from inside the log call.
     body = '{"error": {"code": "boom", "message": ["not", "a", "string"]}}'
-    err = _raised_by_transport(httpx.Response(500, text=body))
+    err = _raised_by_transport(httpx2.Response(500, text=body))
     assert err.code == "boom"
     assert err.message == "HTTP 500"
     assert str(err) == f"HTTP 500: {body}"
@@ -497,7 +497,7 @@ def test_an_unread_streaming_body_degrades_instead_of_raising() -> None:
     # `resp.text` raises ResponseNotRead on a streaming response nothing has
     # read yet -- the same case `resp.json()` degrades on. A failure while
     # composing an error message must not replace the error it describes.
-    resp = httpx.Response(503, stream=httpx.ByteStream(b"no healthy upstream"))
+    resp = httpx2.Response(503, stream=httpx2.ByteStream(b"no healthy upstream"))
     err = _raised_by_transport(resp)
     assert err.code == "http_503"
     assert err.body_excerpt is None
@@ -512,7 +512,7 @@ def test_the_status_code_reaches_the_sdk_surface_unchanged() -> None:
     # caller (and the e2e harnesses) read the `http_` prefix as "no service
     # verdict was reached".
     err = to_sdk_error(error_from_envelope(503, None, body_excerpt="no healthy upstream"))
-    assert type(err) is ComfyError
+    assert type(err) is TurbineError
     assert err.code == "http_503"
     assert err.http_status == 503
     # The excerpt has to cross the layer boundary too: an integrator only ever
@@ -541,7 +541,7 @@ def test_an_unrecognised_status_is_still_not_retried_on_its_own() -> None:
 def test_an_undecodable_success_body_keeps_what_was_served_instead() -> None:
     # The sibling raise site: a proxy interstitial served as a 200. The message
     # says the body would not decode; only the excerpt says what answered.
-    err = _raised_by_transport(httpx.Response(200, text="<html>proxy: gateway timeout</html>"))
+    err = _raised_by_transport(httpx2.Response(200, text="<html>proxy: gateway timeout</html>"))
     assert err.code == "invalid_response"
     assert err.body_excerpt == "<html>proxy: gateway timeout</html>"
     assert str(err) == (
@@ -561,7 +561,7 @@ def test_an_undecodable_success_body_keeps_what_was_served_instead() -> None:
 def test_summarise_detail_names_each_field_rather_than_collapsing() -> None:
     # Two `field required` entries must not collapse to the unrecoverable
     # `field required; field required`: the loc is what tells them apart.
-    from comfy_low.errors import summarise_detail
+    from turbine_low.errors import summarise_detail
 
     summary = summarise_detail(
         [
@@ -596,7 +596,7 @@ def test_a_validation_summary_is_sanitised_before_it_reaches_str() -> None:
 def test_a_validation_summary_is_capped_at_the_excerpt_limit() -> None:
     # Many long entries could otherwise make the message arbitrarily large; the
     # same 256-char cap the excerpt gets applies to the summary.
-    from comfy_low.errors import _BODY_EXCERPT_LIMIT
+    from turbine_low.errors import _BODY_EXCERPT_LIMIT
 
     err = error_from_envelope(
         422,
@@ -624,7 +624,7 @@ def test_a_detail_array_of_non_mappings_never_leaks_a_list_repr() -> None:
 
 
 def test_a_validation_array_under_a_shared_bucket_keeps_its_entries() -> None:
-    import comfy_sdk.router_exceptions as rx
+    import turbine_sdk.router_exceptions as rx
 
     low = error_from_envelope(
         401,
@@ -635,7 +635,7 @@ def test_a_validation_array_under_a_shared_bucket_keeps_its_entries() -> None:
     # `unauthorized` is one of the three buckets both surfaces spell alike. They
     # are a single class now (#157), re-exported from both modules, so there is
     # no longer a collision to resolve -- `except RouterError` and
-    # `except comfy_sdk.Unauthorized` both catch this. What this test pins is the
+    # `except turbine_sdk.Unauthorized` both catch this. What this test pins is the
     # part that is still this change's: the array's typed entries survive the
     # mapping instead of being dropped on the non-Router branch.
     assert isinstance(err, rx.Unauthorized)
@@ -646,8 +646,8 @@ def test_a_validation_array_under_a_shared_bucket_keeps_its_entries() -> None:
 
 
 def test_a_stripped_422_header_validation_array_keeps_its_v2_class() -> None:
-    import comfy_sdk.router_exceptions as rx
-    from comfy_sdk.exceptions import InvalidWorkflow
+    import turbine_sdk.router_exceptions as rx
+    from turbine_sdk.exceptions import InvalidWorkflow
 
     # No `error_type`: the 422 falls to the status-derived `invalid_workflow`
     # guess. The `detail[]` array must NOT retype it into the Router hierarchy
@@ -665,8 +665,8 @@ def test_a_stripped_422_header_validation_array_keeps_its_v2_class() -> None:
 
 
 def test_a_v2_envelope_with_an_array_keeps_its_class_details_and_summary() -> None:
-    import comfy_sdk.router_exceptions as rx
-    from comfy_sdk.exceptions import InvalidWorkflow
+    import turbine_sdk.router_exceptions as rx
+    from turbine_sdk.exceptions import InvalidWorkflow
 
     # An `error.message` AND a `detail[]` array, under a v2 envelope code. The
     # class stays the one integrators catch, and `details` -- the per-node
@@ -704,7 +704,7 @@ def test_a_loc_member_that_is_not_a_scalar_never_leaks_a_repr() -> None:
 
 
 def test_a_huge_detail_array_stops_accumulating_at_the_excerpt_budget() -> None:
-    from comfy_low.errors import _BODY_EXCERPT_LIMIT
+    from turbine_low.errors import _BODY_EXCERPT_LIMIT
 
     # The cap must not be reached by rendering the whole server-controlled array
     # and slicing the tail off: describing a body costs the same whether it is
@@ -715,7 +715,7 @@ def test_a_huge_detail_array_stops_accumulating_at_the_excerpt_budget() -> None:
 
 
 def test_an_unprintable_entry_does_not_spend_the_budget_it_cannot_fill() -> None:
-    from comfy_low.errors import summarise_detail
+    from turbine_low.errors import summarise_detail
 
     # The budget stops accumulation once there is enough to FILL the 256-char
     # cap, so only text that survives the reduction may be charged to it. A
@@ -769,7 +769,7 @@ def assert_bounded_and_printable(text: str) -> None:
     """``text`` is one printable line no longer than the excerpt limit."""
     import unicodedata
 
-    from comfy_low.errors import _BODY_EXCERPT_LIMIT
+    from turbine_low.errors import _BODY_EXCERPT_LIMIT
 
     assert "\n" not in text
     assert "\x1b" not in text
@@ -794,7 +794,7 @@ def assert_bounded_and_printable(text: str) -> None:
     ],
 )
 def test_a_hostile_string_message_is_bounded_and_printable(body: dict, kwargs: dict) -> None:
-    from comfy_low.errors import _BODY_EXCERPT_LIMIT
+    from turbine_low.errors import _BODY_EXCERPT_LIMIT
 
     status = 502 if "detail" in body else 500
     err = error_from_envelope(status, body, **kwargs)

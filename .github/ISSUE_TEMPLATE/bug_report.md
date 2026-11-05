@@ -10,21 +10,21 @@ assignees: ""
 A clear and concise description of what the bug is.
 
 **SDK version**
-Output of `pip show comfy-sdk` (or `python -c "import comfy_sdk; print(comfy_sdk.__version__)"`).
+Output of `pip show turbine-sdk` (or `python -c "import turbine_sdk; print(turbine_sdk.__version__)"`).
 
 **Python version**
 Output of `python --version`.
 
 **Which deployment**
-Comfy Cloud / serverless / self-hosted (behind [comfy-api-proxy](https://github.com/Comfy-Org/comfy-api-proxy)) — and the proxy version if self-hosted.
+TurbineOS or another compatible self-hosted deployment, including its version.
 
 **Minimal reproduction**
 The smallest snippet that reproduces it. Please redact your API key.
 
 ```python
-from comfy_sdk import Comfy
+from turbine_sdk import Turbine
 
-client = Comfy(api_key="comfyui-...")
+client = Turbine(base_url="http://127.0.0.1:8189", api_key=None)
 # ...
 ```
 

@@ -1,16 +1,16 @@
-"""The one base class every ``comfy_sdk`` exception descends from.
+"""The one base class every ``turbine_sdk`` exception descends from.
 
 Its own module, and a deliberately tiny one, because both exception modules
-need it and one of them needs the other: :mod:`comfy_sdk.router_exceptions`
+need it and one of them needs the other: :mod:`turbine_sdk.router_exceptions`
 defines the classes the Router surface raises, and
-:mod:`comfy_sdk.exceptions` — which owns ``to_sdk_error`` — both re-exports
-several of them and maps wire codes onto them. With ``ComfyError`` living in
+:mod:`turbine_sdk.exceptions` — which owns ``to_sdk_error`` — both re-exports
+several of them and maps wire codes onto them. With ``TurbineError`` living in
 ``exceptions`` that was a cycle, and the cycle was what forced the two
 hierarchies apart in the first place: ``exceptions`` could not name a
 ``RouterError`` subclass, so it grew its own ``Unauthorized``, ``Forbidden``
 and ``InsufficientCredits`` beside the Router ones, and ``except RouterError``
 silently missed all three. Import it from either module, or from the top-level
-package; ``comfy_sdk.exceptions.ComfyError`` is this exact class.
+package; ``turbine_sdk.exceptions.TurbineError`` is this exact class.
 """
 
 from __future__ import annotations
@@ -18,16 +18,16 @@ from __future__ import annotations
 from typing import Any
 
 
-class ComfyError(Exception):
+class TurbineError(Exception):
     """Base for every SDK-level error."""
 
     #: The ``Idempotency-Key`` the failed call was made under. Populated by
-    #: :meth:`comfy_sdk.models.Models.run` and
-    #: :meth:`comfy_sdk.models.Models.submit` and their async twins, and by
-    #: :meth:`comfy_sdk.client.Comfy.submit` /
-    #: :meth:`comfy_sdk.client.AsyncComfy.submit` on every failure of the
+    #: :meth:`turbine_sdk.models.Models.run` and
+    #: :meth:`turbine_sdk.models.Models.submit` and their async twins, and by
+    #: :meth:`turbine_sdk.client.Turbine.submit` /
+    #: :meth:`turbine_sdk.client.AsyncTurbine.submit` on every failure of the
     #: ``POST /jobs`` attempt itself — and so by the submit phase of
-    #: ``Comfy.run`` / ``AsyncComfy.run``. A failure while ``run`` polls the
+    #: ``Turbine.run`` / ``AsyncTurbine.run``. A failure while ``run`` polls the
     #: job afterwards (a ``JobFailed``, a wait timeout) carries none: by then
     #: the job exists and its id is the handle. It is ``None`` everywhere
     #: else: on an operation that sends no key, on an asset upload (which
@@ -41,7 +41,7 @@ class ComfyError(Exception):
     #: surface that replays a claimed key, so the key is a handle on the
     #: generation you were already billed for. ``POST /jobs`` instead
     #: *rejects* a reused key with ``422 idempotency_key_reuse``, so on a
-    #: ``Comfy.submit`` failure the key is the one this attempt was made
+    #: ``Turbine.submit`` failure the key is the one this attempt was made
     #: under, not a replay handle: after an ambiguous failure poll or list for
     #: the job the first attempt may have created rather than resubmitting
     #: under it, while a failure the server never saw (a connect failure, an
@@ -49,7 +49,7 @@ class ComfyError(Exception):
     #:
     #: Declared on the base rather than set per subclass so that a bucket this
     #: SDK version has never heard of — which arrives as a bare
-    #: :class:`~comfy_sdk.router_exceptions.RouterError` — still carries it.
+    #: :class:`~turbine_sdk.router_exceptions.RouterError` — still carries it.
     idempotency_key: str | None = None
 
     #: Server-minted id for the call, from ``X-Comfy-Request-Id``, or ``None``
@@ -66,7 +66,7 @@ class ComfyError(Exception):
     #: required ``int``.
     retry_after: int | None = None
 
-    #: ``True`` only on the failure :meth:`comfy_sdk.models.Models.run` re-raises
+    #: ``True`` only on the failure :meth:`turbine_sdk.models.Models.run` re-raises
     #: after a same-key resend was refused — the original failure, with the key
     #: refusal on ``__cause__``. It exists for outer retry wrappers: a wrapper
     #: keyed on ``http_status >= 500`` alone would retry this error, and every
@@ -101,4 +101,4 @@ class ComfyError(Exception):
         self.retry_after = retry_after
 
 
-__all__ = ["ComfyError"]
+__all__ = ["TurbineError"]

@@ -1,39 +1,9 @@
-"""The clients integrators import: :class:`Comfy` (sync) and :class:`AsyncComfy`.
+"""Sync and async TurbineOS clients over one shared protocol transport.
 
-Both expose the same surface — ``assets`` / ``workflows`` / ``jobs`` constructor
-namespaces, the ``models`` namespace, plus ``submit`` / ``run`` — over a shared
-sans-IO core. Every namespace is bound to the client's own transport, so they
-share its credentials, base URL, connection pool and timeout. Only the
-awaiting methods are duplicated; the rules (idempotency, 429 backoff, asset
-materialization, UI-format detection) live in ``_core`` and are called from both.
-
-Both clients target Comfy Cloud. Another deployment — a self-hosted proxy or a
-serverless one — is selected through the ``COMFY_BASE_URL`` environment
-variable; there is no base-URL constructor parameter.
-
-``client.models`` is the exception, and deliberately so: model runs are
-model-ID-addressed routes on **Comfy Router**, a different host, so they follow
-``COMFY_ROUTER_BASE_URL`` (default ``https://api.comfy.org``) instead. One
-variable pointed at both surfaces would send jobs to Router or model runs to
-the v2 API; neither serves the other's routes. The credential is the same one
-either way — this client's own bearer token, attached to both of its configured
-origins and to no third one.
-
-Credentials resolve in a fixed order at construction: the explicit ``api_key``
-argument, then the ``COMFY_API_KEY`` environment variable, then — targeting
-Comfy Cloud, which always requires a key — a local :class:`MissingApiKey`
-naming that variable, raised before any request rather than surfacing as a
-server 401 on the first call. A deployment named by ``COMFY_BASE_URL`` may
-have no auth at all (a self-hosted ComfyUI behind the API proxy), so there an
-unresolved key stays valid and means "send no credentials". That constructor
-key is this client's own credential (sent as the ``Authorization`` bearer
-token) and is unrelated to the ``api_key`` accepted by ``submit``/``run``,
-which authenticates partner (API) nodes embedded in a workflow (e.g. Gemini)
-and is sent in the request body instead.
-
-The key itself is write-only from the outside: it is never logged, never
-rendered by a client's ``repr``/``str`` (which report only *whether* one is
-attached), and never placed in an exception message.
+``base_url`` or ``TURBINE_BASE_URL`` selects the deployment. Router is enabled
+only by an explicit ``router_base_url``. Omit ``api_key`` to read
+``TURBINE_API_KEY``; pass ``None`` to omit the SDK bearer credential.
+Injected HTTPX2 clients stay owned and configured by their caller.
 """
 
 from __future__ import annotations
@@ -42,20 +12,21 @@ import os
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
-from urllib.parse import urlsplit
 
-from comfy_low.errors import ApiError
-from comfy_low.transport import (
-    ROUTER_BASE_URL,
-    AsyncComfyLow,
-    ComfyLow,
+import httpx2
+
+from turbine_low.errors import ApiError
+from turbine_low.transport import (
+    AsyncTurbineLow,
+    TurbineLow,
+    _validate_base_url,
     metadata_filter_pairs,
-    origin,
 )
 
 from . import _core
 from .assets import AssetFactory, AsyncAssetFactory
-from .exceptions import ComfyError, MissingApiKey, WorkflowFormatUi, to_sdk_error, translating
+from .exceptions import TurbineError, WorkflowFormatUi, to_sdk_error, translating
+from .extensions import AsyncTurbineExtensions, TurbineExtensions
 from .jobs import AsyncJob, AsyncJobFactory, Job, JobFactory, JobSummary
 from .models import AsyncModels, Models
 from .retry import DEFAULT_RETRY, RetryPolicy
@@ -63,26 +34,17 @@ from .workflows import Workflow, WorkflowFactory
 
 # How long to keep retrying a full queue before giving up (seconds).
 _QUEUE_RETRY_BUDGET = 60.0
-#: Base URL of the hosted Comfy Cloud deployment — where a client points by default.
-COMFY_CLOUD_BASE_URL = "https://cloud.comfy.org"
-#: Environment variable that redirects a client at another deployment.
-BASE_URL_ENV_VAR = "COMFY_BASE_URL"
-#: Base URL of Comfy Router — where ``client.models`` sends its requests. A
-#: *separate* target from :data:`COMFY_CLOUD_BASE_URL`: the ``/api/v2`` surface
-#: serves jobs and assets, Router serves the model-ID-addressed invocation
-#: routes, and they are different hosts. The literal lives in
-#: :mod:`comfy_low.transport` (the layer that owns the wire) and is re-exported
-#: here so it sits beside the constant it is most often confused with.
-COMFY_ROUTER_BASE_URL = ROUTER_BASE_URL
-#: Environment variable that redirects *model runs* at another Router
-#: deployment. Deliberately a second variable rather than a reuse of
-#: :data:`BASE_URL_ENV_VAR`: one variable pointed at both surfaces would send
-#: jobs to Router, or model runs to the v2 API, and neither serves the other's
-#: routes. Spelled the same as the TypeScript SDK's, so a test environment sets
-#: one variable for both.
-ROUTER_BASE_URL_ENV_VAR = "COMFY_ROUTER_BASE_URL"
-#: Environment variable read when no ``api_key`` is passed to the constructor.
-API_KEY_ENV_VAR = "COMFY_API_KEY"
+#: Environment variable read when no explicit deployment URL is supplied.
+BASE_URL_ENV_VAR = "TURBINE_BASE_URL"
+#: Environment variable read only when the ``api_key`` argument is omitted.
+API_KEY_ENV_VAR = "TURBINE_API_KEY"
+
+
+class _ApiKeyUnset:
+    """Distinguish an omitted key from explicit ``None`` internally."""
+
+
+_API_KEY_UNSET = _ApiKeyUnset()
 
 _DEFAULT_RETRY_AFTER = 2
 # The shortest wait before a 429 retry, so a `Retry-After: 0` (or a negative
@@ -110,19 +72,21 @@ def _retry_delay(exc: ApiError, deadline: float) -> float | None:
 
 
 def _page_jobs(page: Any) -> list[Any]:
-    """The ``jobs`` list of one :meth:`Comfy.list_jobs` page (empty when absent or null)."""
+    """The ``jobs`` list of one :meth:`Turbine.list_jobs` page (empty when absent or null)."""
     if not isinstance(page, dict):
-        raise ComfyError("job list response is not a JSON object", code="invalid_response")
+        raise TurbineError("job list response is not a JSON object", code="invalid_response")
     jobs = page.get("jobs")
     if jobs is None:
         return []
     if not isinstance(jobs, list):
-        raise ComfyError("job list response field 'jobs' is not an array", code="invalid_response")
+        raise TurbineError(
+            "job list response field 'jobs' is not an array", code="invalid_response"
+        )
     return jobs
 
 
 def _next_list_cursor(page: dict[str, Any], sent: set[str]) -> str | None:
-    """The cursor for the :meth:`Comfy.list_jobs` page after ``page``; ``None`` ends the list.
+    """The cursor for the :meth:`Turbine.list_jobs` page after ``page``; ``None`` ends the list.
 
     A missing, null or empty ``next_cursor`` is the last page; any other value
     that is not a string (``0``, ``false`` and ``[]`` included) raises. A
@@ -133,11 +97,11 @@ def _next_list_cursor(page: dict[str, Any], sent: set[str]) -> str | None:
     if cursor is None or cursor == "":
         return None
     if not isinstance(cursor, str):
-        raise ComfyError(
+        raise TurbineError(
             "job list response field 'next_cursor' is not a string", code="invalid_response"
         )
     if cursor in sent:
-        raise ComfyError(
+        raise TurbineError(
             "job list returned a cursor it already returned; stopping to avoid a loop",
             code="invalid_response",
         )
@@ -155,110 +119,23 @@ def _has_labels(summary: JobSummary, metadata: Mapping[str, str] | None) -> bool
     return all(summary.metadata.get(k) == v for k, v in metadata_filter_pairs(metadata))
 
 
-def _resolve_env_url(var: str, default: str) -> str:
-    """``var``'s value if it names a usable target, else ``default``.
-
-    Read per construction rather than at import so a process can point
-    successive clients at different deployments. An unset-or-blank variable
-    means the default, so ``COMFY_BASE_URL=`` in a shell profile or ``.env``
-    is not an error.
-
-    Shared by both targets so the two cannot validate differently — a rule that
-    held for the v2 base URL and not for the Router one would be a rule nobody
-    could state.
-    """
-    raw = os.environ.get(var, "").strip()
-    if not raw:
-        return default
-    parsed = urlsplit(raw)
-    try:
-        # urlsplit defers the port check, so a non-numeric or out-of-range one
-        # raises only when .port is read — do it here rather than let httpx
-        # fail later with a murkier message.
-        _port = parsed.port
-        # A query or fragment would land in the middle of every request URL,
-        # since the transport builds those by appending the API path.
-        valid = (
-            parsed.scheme in ("http", "https")
-            and bool(parsed.netloc)
-            and not parsed.query
-            and not parsed.fragment
-        )
-    except ValueError:
-        valid = False
-    if not valid:
-        raise ValueError(
-            f"{var} must be an http(s) URL with no query or fragment "
-            f"(e.g. 'http://127.0.0.1:8189'); got {raw!r}"
-        )
-    return raw
+def _resolve_base_url(explicit: str | None) -> str:
+    if explicit is not None:
+        return _validate_base_url(explicit, "base_url")
+    raw = os.environ.get(BASE_URL_ENV_VAR)
+    if raw is None:
+        raise ValueError(f"pass base_url=... or set {BASE_URL_ENV_VAR}")
+    return _validate_base_url(raw, BASE_URL_ENV_VAR)
 
 
-def _resolve_base_url() -> str:
-    """Comfy Cloud, unless ``COMFY_BASE_URL`` names another deployment."""
-    return _resolve_env_url(BASE_URL_ENV_VAR, COMFY_CLOUD_BASE_URL)
-
-
-def _resolve_router_base_url() -> str:
-    """Comfy Router, unless ``COMFY_ROUTER_BASE_URL`` names another one.
-
-    Same validation as :func:`_resolve_base_url`, and the same
-    read-per-construction rule. The trailing slash is stripped here as well as
-    in the transport, because this value is *concatenated* with a path that
-    already starts with ``/`` — ``https://api.comfy.org//v2/models/...`` is a
-    different path to an origin server than the one the spec declares.
-    """
-    return _resolve_env_url(ROUTER_BASE_URL_ENV_VAR, COMFY_ROUTER_BASE_URL).rstrip("/")
-
-
-def _same_deployment(url: str, other: str) -> bool:
-    """Whether two base URLs name the same deployment.
-
-    Compared by normalized origin (scheme, host, effective port — shared with
-    the transport's same-origin credential rule) plus path, rather than by
-    string. ``https://cloud.comfy.org:443/`` is Comfy Cloud with its default
-    port written out, and reading it as *some other* deployment would hand the
-    caller a keyless client and a server 401 on the first request instead of
-    the local error this module promises.
-
-    The path is part of the comparison because a deployment mounted under the
-    same host (``https://cloud.comfy.org/self-hosted``) is a different target,
-    and the keyless carve-out has to keep applying to it.
-    """
-    return (origin(url), urlsplit(url).path.rstrip("/")) == (
-        origin(other),
-        urlsplit(other).path.rstrip("/"),
-    )
-
-
-def _resolve_api_key(explicit: str | None, base_url: str) -> str | None:
-    """The explicit argument, then ``COMFY_API_KEY``, then a clear local error.
-
-    Read per construction (like the base URL) so one process can build
-    successive clients under different credentials. Surrounding whitespace is
-    stripped and a blank value counts as unset at either source, so
-    ``COMFY_API_KEY=`` in a shell profile — or a key read out of a file with a
-    trailing newline — behaves the way it looks.
-
-    Comfy Cloud always requires a key, so exhausting both sources there raises
-    :class:`~comfy_sdk.exceptions.MissingApiKey` *here*, with no network call
-    attempted: a missing credential reported as a server 401 sends the caller
-    looking at their key's validity instead of its absence. A deployment named
-    by ``COMFY_BASE_URL`` may legitimately have none (a self-hosted ComfyUI
-    behind the API proxy), so there an unresolved key is not an error and keeps
-    its documented meaning — send no credentials at all.
-    """
-    for candidate in (explicit, os.environ.get(API_KEY_ENV_VAR)):
-        if candidate and candidate.strip():
-            return candidate.strip()
-    if _same_deployment(base_url, COMFY_CLOUD_BASE_URL):
-        raise MissingApiKey(
-            f"no API key: pass api_key=... to the client, or set {API_KEY_ENV_VAR} in the "
-            f"environment. Comfy Cloud ({COMFY_CLOUD_BASE_URL}) requires one; set "
-            f"{BASE_URL_ENV_VAR} to target a deployment that does not.",
-            code="missing_api_key",
-        )
-    return None
+def _resolve_api_key(explicit: str | None | _ApiKeyUnset) -> str | None:
+    if isinstance(explicit, _ApiKeyUnset):
+        return os.environ.get(API_KEY_ENV_VAR, "").strip() or None
+    if explicit is None:
+        return None
+    if not isinstance(explicit, str) or not explicit.strip():
+        raise ValueError("api_key must be a non-blank string or None")
+    return explicit.strip()
 
 
 def _guard_ui_format(workflow: Workflow) -> None:
@@ -271,39 +148,35 @@ def _guard_ui_format(workflow: Workflow) -> None:
         )
 
 
-class Comfy:
-    """Synchronous Comfy API v2 client.
+class Turbine:
+    """Synchronous TurbineOS client.
 
-    Targets Comfy Cloud, or whatever deployment ``COMFY_BASE_URL`` names.
-    ``api_key`` is keyword-only so a pre-``COMFY_BASE_URL`` positional URL
-    fails loudly instead of being read as a key. Omit it to fall back to
-    ``COMFY_API_KEY``; against Comfy Cloud, neither raises
-    :class:`~comfy_sdk.exceptions.MissingApiKey` at construction.
-
-    ``retry`` is the policy ``client.models`` calls fail under —
-    :data:`~comfy_sdk.retry.DEFAULT_RETRY` unless replaced, and
-    :data:`~comfy_sdk.retry.NO_RETRY` to make every call exactly one attempt.
-    It does not govern this client's own ``submit``/``run`` (the workflow
-    surface), whose 429 handling follows the server's own ``Retry-After``
-    instead.
+    Configure a deployment through ``base_url`` or ``TURBINE_BASE_URL``.
+    ``client`` optionally supplies a caller-owned HTTPX2 pool; Router is
+    disabled until ``router_base_url`` is explicitly supplied.
+    ``retry`` governs Router calls; workflow submit keeps its existing 429 policy.
     """
 
     def __init__(
         self,
         *,
-        api_key: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None | _ApiKeyUnset = _API_KEY_UNSET,
+        router_base_url: str | None = None,
+        client: httpx2.Client | None = None,
         timeout: float | None = 30.0,
         client_info: str | None = None,
         retry: RetryPolicy = DEFAULT_RETRY,
     ) -> None:
-        base_url = _resolve_base_url()
-        key = _resolve_api_key(api_key, base_url)
-        self._low = ComfyLow(
+        base_url = _resolve_base_url(base_url)
+        key = _resolve_api_key(api_key)
+        self._low = TurbineLow(
             base_url,
             key,
             timeout=timeout,
             client_info=client_info,
-            router_base_url=_resolve_router_base_url(),
+            router_base_url=router_base_url,
+            client=client,
         )
         self.assets = AssetFactory(self._low)
         self.workflows = WorkflowFactory()
@@ -312,17 +185,17 @@ class Comfy:
         #: transport (credentials, base URL, connection pool, timeout) and its
         #: retry policy.
         self.models = Models(self._low, retry)
+        self.turbine = TurbineExtensions(self._low)
 
     def close(self) -> None:
-        """Release the underlying HTTP connection pool.
+        """Close the HTTP pool when the SDK created it.
 
-        Prefer the context-manager form (``with Comfy(...) as client:``), which
-        calls this for you. Job handles created from this client cannot be used
-        afterwards.
+        A caller-supplied HTTPX2 client stays open. Prefer the context-manager
+        form (``with Turbine(...) as client:``) for an SDK-owned pool.
         """
         self._low.close()
 
-    def __enter__(self) -> Comfy:
+    def __enter__(self) -> Turbine:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -375,8 +248,8 @@ class Comfy:
 
         Every exception the ``POST /jobs`` attempt itself raises carries the
         key it was made under on ``.idempotency_key``: the mapped
-        ``ComfyError``, a ``QueueFull`` once the retry budget is spent, and a
-        transport failure that never reached a response (``httpx.ConnectError``,
+        ``TurbineError``, a ``QueueFull`` once the retry budget is spent, and a
+        transport failure that never reached a response (``httpx2.ConnectError``,
         a read timeout), which reads ``.request_id`` and ``.retry_after`` as
         ``None`` rather than raising. A failure raised before the request
         exists — a UI-format workflow, an asset that would not upload — carries
@@ -398,7 +271,7 @@ class Comfy:
         ``{"client": "acme"}``), read back from :attr:`Job.metadata` and
         matched by :meth:`list_jobs`. It is sent as given: the server owns the
         limits on keys, values and count, and a map it refuses raises
-        :class:`~comfy_sdk.exceptions.ComfyError` with ``code ==
+        :class:`~turbine_sdk.exceptions.TurbineError` with ``code ==
         "metadata_invalid"`` (HTTP 422) and the server's message: it names the
         key when one key or value breaks a rule, and gives the count when there
         are more than 16 pairs. Labels work on a deployment's address; Comfy
@@ -455,7 +328,7 @@ class Comfy:
         """Every job this client can see, newest first, one page at a time.
 
         At a deployment's address that is the deployment's jobs; at the
-        workspace address (``COMFY_BASE_URL=https://platformapi.comfy.org``,
+        workspace address (``TURBINE_BASE_URL=https://platformapi.comfy.org``,
         which serves the job list only), every job in the workspace.
 
         ``metadata`` keeps only the jobs whose labels include every given
@@ -463,9 +336,9 @@ class Comfy:
         the last page; on a host that pages, ``limit`` is the page size, not a
         cap on the total. The
         server owns the filter rules (how many keys, which characters) and
-        refuses a bad filter with :class:`~comfy_sdk.exceptions.ComfyError`
+        refuses a bad filter with :class:`~turbine_sdk.exceptions.TurbineError`
         (``code == "invalid_metadata_filter"``). A cursor the server did not
-        issue raises :class:`~comfy_sdk.exceptions.ComfyError` with ``code ==
+        issue raises :class:`~turbine_sdk.exceptions.TurbineError` with ``code ==
         "invalid_cursor"``; a page that hands back a cursor this iteration
         already sent, or one that is not a string, raises ``code ==
         "invalid_response"`` rather than being followed.
@@ -486,7 +359,7 @@ class Comfy:
         gets, so a long list is not cut short by 429s on earlier pages.
 
         Comfy Cloud does not list jobs yet: it answers ``code ==
-        "not_implemented"`` (HTTP 501). Yields :class:`~comfy_sdk.jobs.JobSummary`
+        "not_implemented"`` (HTTP 501). Yields :class:`~turbine_sdk.jobs.JobSummary`
         items; call ``client.jobs.get(summary.id)`` for a full job and its outputs.
         """
         cursor: str | None = None
@@ -527,49 +400,49 @@ def _run_with_timeout(job: Job, timeout: float) -> Job:
     return job
 
 
-class AsyncComfy:
-    """Asynchronous Comfy API v2 client — mirrors :class:`Comfy`.
-
-    Same credential resolution (explicit ``api_key`` → ``COMFY_API_KEY`` →
-    :class:`~comfy_sdk.exceptions.MissingApiKey` on Comfy Cloud) and the same
-    key-free ``repr``.
-    """
+class AsyncTurbine:
+    """Asynchronous TurbineOS client with the same configuration as :class:`Turbine`."""
 
     def __init__(
         self,
         *,
-        api_key: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None | _ApiKeyUnset = _API_KEY_UNSET,
+        router_base_url: str | None = None,
+        client: httpx2.AsyncClient | None = None,
         timeout: float | None = 30.0,
         client_info: str | None = None,
         retry: RetryPolicy = DEFAULT_RETRY,
     ) -> None:
-        base_url = _resolve_base_url()
-        key = _resolve_api_key(api_key, base_url)
-        self._low = AsyncComfyLow(
+        base_url = _resolve_base_url(base_url)
+        key = _resolve_api_key(api_key)
+        self._low = AsyncTurbineLow(
             base_url,
             key,
             timeout=timeout,
             client_info=client_info,
-            router_base_url=_resolve_router_base_url(),
+            router_base_url=router_base_url,
+            client=client,
         )
         self.assets = AsyncAssetFactory(self._low)
         self.workflows = WorkflowFactory()
         self.jobs = AsyncJobFactory(self._low)
-        #: Async counterpart of :attr:`Comfy.models`, on this client's transport.
+        #: Async counterpart of :attr:`Turbine.models`, on this client's transport.
         self.models = AsyncModels(self._low, retry)
+        self.turbine = AsyncTurbineExtensions(self._low)
 
     async def aclose(self) -> None:
-        """Async :meth:`Comfy.close`. Prefer ``async with AsyncComfy(...)``."""
+        """Async :meth:`Turbine.close`. Prefer ``async with AsyncTurbine(...)``."""
         await self._low.aclose()
 
-    async def __aenter__(self) -> AsyncComfy:
+    async def __aenter__(self) -> AsyncTurbine:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
         await self.aclose()
 
     def __repr__(self) -> str:
-        """Key-free, exactly as :meth:`Comfy.__repr__`."""
+        """Key-free, exactly as :meth:`Turbine.__repr__`."""
         return (
             f"{type(self).__name__}(base_url={self._low.safe_base_url!r}, "
             f"authenticated={self._low.authenticated})"
@@ -591,7 +464,7 @@ class AsyncComfy:
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
     ) -> AsyncJob:
-        """Mirrors :meth:`Comfy.submit` — see there for ``api_key`` and ``metadata``."""
+        """Mirrors :meth:`Turbine.submit` — see there for ``api_key`` and ``metadata``."""
         import asyncio
 
         _guard_ui_format(workflow)
@@ -603,7 +476,7 @@ class AsyncComfy:
         graph = await self._materialize(workflow)
         extra_data = _core.extra_data_for(api_key)
         deadline = _now() + _QUEUE_RETRY_BUDGET
-        # See :meth:`Comfy.submit` — same stamp, and here it also rides out on
+        # See :meth:`Turbine.submit` — same stamp, and here it also rides out on
         # the cancellation of an in-flight `post_jobs`.
         with translating(idempotency_key=key):
             while True:
@@ -627,7 +500,7 @@ class AsyncComfy:
         api_key: str | None = None,
         timeout: float | None = None,
     ) -> AsyncJob:
-        """Async :meth:`Comfy.run` — submit, then poll to terminal. Raises on failure."""
+        """Async :meth:`Turbine.run` — submit, then poll to terminal. Raises on failure."""
         from ._core import SUCCESS
         from .exceptions import JobFailed
 
@@ -645,7 +518,7 @@ class AsyncComfy:
         metadata: Mapping[str, str] | None = None,
         limit: int | None = None,
     ) -> AsyncIterator[JobSummary]:
-        """Async :meth:`Comfy.list_jobs` — ``async for summary in client.list_jobs(...)``."""
+        """Async :meth:`Turbine.list_jobs` — ``async for summary in client.list_jobs(...)``."""
         cursor: str | None = None
         sent: set[str] = set()
         while True:
@@ -661,7 +534,7 @@ class AsyncComfy:
     async def _list_page(
         self, metadata: Mapping[str, str] | None, limit: int | None, cursor: str | None
     ) -> dict[str, Any]:
-        """Async :meth:`Comfy._list_page`."""
+        """Async :meth:`Turbine._list_page`."""
         import asyncio
 
         deadline = _now() + _QUEUE_RETRY_BUDGET

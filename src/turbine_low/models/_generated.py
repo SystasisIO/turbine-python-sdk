@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Any
 
 from pydantic import AnyUrl, AwareDatetime, BaseModel, Field
@@ -49,7 +49,7 @@ class Asset(BaseModel):
     ] = None
 
 
-class Format(Enum):
+class Format(StrEnum):
     """
     Discriminates the `workflow` field's shape. `save`: the original authoring workflow JSON, at the version pinned to the job. `api`: the executed API-format prompt graph.
     """
@@ -75,7 +75,7 @@ class JobWorkflowResponse(BaseModel):
     ]
 
 
-class JobStatus(Enum):
+class JobStatus(StrEnum):
     """
     Lifecycle: queued → running → succeeded | failed | expired;
     a cancel request moves running → canceling → canceled.
@@ -125,7 +125,7 @@ class Progress(BaseModel):
     message: Annotated[str | None, Field(examples=['KSampler 21/50'])] = None
 
 
-class OutputType(Enum):
+class OutputType(StrEnum):
     """
     Normalized output kind — nothing silently dropped.
     """
@@ -214,7 +214,7 @@ class LogEvent(BaseModel):
     message: str
 
 
-class FieldType(Enum):
+class FieldType(StrEnum):
     core_ASSET = 'core/ASSET'
 
 

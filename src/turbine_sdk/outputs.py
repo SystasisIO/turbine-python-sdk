@@ -14,8 +14,8 @@ from os import PathLike
 from pathlib import Path
 from typing import BinaryIO
 
-from comfy_low.models import Output as LowOutput
-from comfy_low.transport import AsyncComfyLow, ComfyLow
+from turbine_low.models import Output as LowOutput
+from turbine_low.transport import AsyncTurbineLow, TurbineLow
 
 from .exceptions import translating
 
@@ -52,7 +52,7 @@ class DownloadUrl:
 class Output:
     """A single job output, downloadable via the sync transport."""
 
-    def __init__(self, model: LowOutput, low: ComfyLow) -> None:
+    def __init__(self, model: LowOutput, low: TurbineLow) -> None:
         self._model = model
         self._low = low
 
@@ -147,7 +147,7 @@ class Output:
 class AsyncOutput:
     """A single job output, downloadable via the async transport."""
 
-    def __init__(self, model: LowOutput, low: AsyncComfyLow) -> None:
+    def __init__(self, model: LowOutput, low: AsyncTurbineLow) -> None:
         self._model = model
         self._low = low
 

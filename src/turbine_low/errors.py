@@ -1,7 +1,7 @@
 """The shared error envelope mapped to a typed exception per ``code``.
 
-This is the ``comfy_low`` (protocol) view of errors: one class per documented
-error ``code``, plus a fallback. ``comfy_sdk`` re-raises these as its own
+This is the ``turbine_low`` (protocol) view of errors: one class per documented
+error ``code``, plus a fallback. ``turbine_sdk`` re-raises these as its own
 idiomatic exceptions where it adds value (e.g. ``JobFailed`` carrying node
 details), but the protocol codes are defined here so the generated layer has a
 stable, typed error surface.
@@ -20,7 +20,7 @@ from typing import Any
 #: into a support ticket — so it is reduced to something safe to display rather
 #: than kept verbatim. Matching a leading run (rather than deleting the
 #: offending bytes) also gives the right answer for the one case a well-behaved
-#: server can still produce: ``httpx.Headers.get`` joins duplicate headers with
+#: server can still produce: ``httpx2.Headers.get`` joins duplicate headers with
 #: ``", "``, and a comma is not in the class, so ``"a1, a2"`` yields ``"a1"``
 #: instead of a spliced ``"a1a2"`` that identifies no call at all.
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._:+/=@-]{1,200}")
@@ -30,8 +30,8 @@ def clean_request_id(raw: Any) -> str | None:
     """``raw`` reduced to a bounded, printable request id, or ``None``.
 
     Defined here rather than beside either reader because both error surfaces
-    parse the same header off their own response — ``comfy_low.transport`` off
-    the shared envelope, ``comfy_sdk.router_exceptions`` off the router's — and
+    parse the same header off their own response — ``turbine_low.transport`` off
+    the shared envelope, ``turbine_sdk.router_exceptions`` off the router's — and
     an id that is safe to display on one of them has to be safe on the other.
     """
     if not isinstance(raw, str):
@@ -124,11 +124,11 @@ class ApiError(Exception):
         #: describe the same failure.
         #:
         #: Kept raw on purpose. The typed view of these entries is
-        #: ``comfy_sdk.router_exceptions.ValidationErrorDetail``, and this layer
-        #: may not import ``comfy_sdk`` (``tests/test_error_contract.py``), so
+        #: ``turbine_sdk.router_exceptions.ValidationErrorDetail``, and this layer
+        #: may not import ``turbine_sdk`` (``tests/test_error_contract.py``), so
         #: the entries ride up untyped and are converted at the translation
-        #: boundary (``comfy_sdk.exceptions.to_sdk_error``) onto
-        #: ``RouterError.errors``. A caller catches the ``comfy_sdk`` exception
+        #: boundary (``turbine_sdk.exceptions.to_sdk_error``) onto
+        #: ``RouterError.errors``. A caller catches the ``turbine_sdk`` exception
         #: and reads them there; this attribute is the carrier, not the surface.
         self.validation_errors: tuple[Mapping[str, Any], ...] = tuple(validation_errors)
         self.retry_after = retry_after
@@ -143,13 +143,13 @@ class ApiError(Exception):
         #: ``code`` cannot be read backwards: the three buckets both surfaces
         #: spell identically (``unauthorized``, ``forbidden``,
         #: ``insufficient_credits``) leave ``code`` saying nothing about who
-        #: answered. What it buys is at the ``comfy_sdk`` boundary — a bucket
+        #: answered. What it buys is at the ``turbine_sdk`` boundary — a bucket
         #: Router adds after this SDK version was built has no class to map to,
         #: and this is what lets ``to_sdk_error`` still raise a ``RouterError``
-        #: for it rather than a bare ``ComfyError`` that no Router handler
+        #: for it rather than a bare ``TurbineError`` that no Router handler
         #: catches.
         #:
-        #: One interaction to know about: ``comfy_sdk.retry.error_bucket_of``
+        #: One interaction to know about: ``turbine_sdk.retry.error_bucket_of``
         #: reads ``error_type`` *before* ``code``, so this attribute is now the
         #: one it answers with on a bucketed response. That is the same string
         #: either way — the two contracts are mutually exclusive on the wire
@@ -294,7 +294,7 @@ def _clean(value: Any) -> str | None:
 def _location(raw_loc: Any) -> str:
     """A ``detail[]`` entry's ``loc`` rendered as a dotted path, or ``""``.
 
-    :meth:`comfy_sdk.router_exceptions.ValidationErrorDetail.location` delegates
+    :meth:`turbine_sdk.router_exceptions.ValidationErrorDetail.location` delegates
     here rather than restating the join, so a per-field failure reads the same
     whichever surface built the summary — ``body.images.0`` where an integer
     indexes into an array — and the two cannot drift apart.
@@ -342,7 +342,7 @@ def summarise_detail(entries: Any) -> str | None:
     Defined on this lowest layer because both error surfaces summarise the same
     array off their own response and must produce one string for one wire body:
     :func:`error_from_envelope` on the awaited ``models.run`` path,
-    ``comfy_sdk.router_exceptions`` on the queued one.
+    ``turbine_sdk.router_exceptions`` on the queued one.
     """
     if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
         return None
@@ -417,7 +417,7 @@ _CANCEL_REFUSAL_STATUS = 409
 #: ``status`` field is not an error code, and treating any value found there as
 #: one would invent buckets out of a body that was only reporting state. A new
 #: refusal shape is one entry here plus one class in
-#: ``comfy_sdk.router_exceptions``.
+#: ``turbine_sdk.router_exceptions``.
 _CODE_BY_CANCEL_STATUS: dict[str, str] = {"ALREADY_COMPLETED": "already_completed"}
 
 
@@ -465,7 +465,7 @@ def error_from_envelope(
     repeats the same coarse bucket on the ``X-Comfy-Error-Type`` header
     (``spec/router-openapi.yaml``). Reading only ``error["code"]`` would collapse
     every one of those to the status-derived default — for a ``504`` that
-    default names only the status (``"http_504"``), and ``comfy_sdk.retry`` keys
+    default names only the status (``"http_504"``), and ``turbine_sdk.retry`` keys
     its default-on collect rule on the bucket, so the rule would be a silent
     no-op against every real Router ``504``. ``error_type`` (the header, passed by the
     caller) and the body's own top-level ``error_type`` are read to prevent that.
@@ -575,7 +575,7 @@ def error_from_envelope(
             # The entries summarised — each `<loc>: <msg>`, sanitised and bounded
             # — rather than the status-derived default: a body that named every
             # failing field would otherwise reach a caller as a bare `HTTP 422`.
-            # `comfy_sdk.router_exceptions` summarises the same array the same way
+            # `turbine_sdk.router_exceptions` summarises the same array the same way
             # off the queued surface, so one wire body yields one message.
             message = summarise_detail(raw_detail) or message
     if not message:
@@ -629,12 +629,12 @@ def error_from_envelope(
 #: (``POST /assets``) and ``asset_in_use`` (``DELETE /assets/{id}``), so even
 #: on the compliant surface the status alone does not say which. A code-less
 #: ``409`` therefore stays a bare ``ApiError`` carrying the real status, and
-#: surfaces to the caller as a plain ``ComfyError``. A real hash mismatch is
+#: surfaces to the caller as a plain ``TurbineError``. A real hash mismatch is
 #: unaffected *whenever its body decodes*: ``error.code`` is then present and
 #: wins outright. The one path it does not cover is a body that fails to parse
 #: at all — the transport sets ``body=None`` for an HTML proxy page or a
 #: truncated response, so a genuine ``POST /assets`` mismatch behind a broken
-#: intermediary now raises ``ComfyError`` rather than ``HashMismatch``. That is
+#: intermediary now raises ``TurbineError`` rather than ``HashMismatch``. That is
 #: the trade this table exists to make: on an unparseable body there is nothing
 #: that distinguishes the two documented ``409``s, and inventing the re-upload
 #: one is the guess being removed.

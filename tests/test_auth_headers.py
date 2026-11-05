@@ -1,6 +1,6 @@
 """Per-surface authentication: self-hosted needs no key; Cloud/serverless need one.
 
-Locks in the core claim documented on ``Comfy``/``AsyncComfy`` (and in the
+Locks in the core claim documented on ``Turbine``/``AsyncTurbine`` (and in the
 README): a client built with no ``api_key`` must send **no** ``Authorization``
 header at all — not an empty one, none — because a self-hosted proxy has no
 auth to satisfy and must never see stray credentials on the wire. A client
@@ -12,15 +12,15 @@ the part the docs promise.
 
 from __future__ import annotations
 
-from comfy_sdk import Comfy
+from turbine_sdk import Turbine
 
 
-def _wf(client: Comfy):
+def _wf(client: Turbine):
     return client.workflows.from_json({"3": {"class_type": "KSampler", "inputs": {}}})
 
 
 def test_no_api_key_sends_no_authorization_header_at_all(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         job.refresh()
     assert server.state.last_auth_header == ""
@@ -28,7 +28,7 @@ def test_no_api_key_sends_no_authorization_header_at_all(server) -> None:
 
 def test_api_key_sends_bearer_token_on_every_request(server) -> None:
     server.state.require_auth = True
-    with Comfy(api_key="ck_live_test") as client:
+    with Turbine(api_key="ck_live_test", router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         job.refresh()
     assert server.state.last_auth_header == "Bearer ck_live_test"

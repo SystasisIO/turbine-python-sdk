@@ -9,7 +9,7 @@ Three checks, one job:
    gate other repos enforce.
 2. **Router exception classes vs ``spec/router-openapi.yaml``.** The router
    surface has no generated artifact -- its contract lands in the SDK as the
-   hand-written class table in ``comfy_sdk.router_exceptions``. So the drift
+   hand-written class table in ``turbine_sdk.router_exceptions``. So the drift
    that matters there is a bucket the spec declares and the SDK has no class
    for, which would reach callers as an untyped ``RouterError``. This compares
    the spec's ``x-comfy-error-types`` list against ``ROUTER_ERROR_TYPES``,
@@ -19,7 +19,7 @@ Three checks, one job:
    about the prose: a sync that rewrites a bucket's retry guidance and nothing
    else would otherwise pass with the docstring left stale.
 3. **The bound model-run route vs ``spec/router-openapi.yaml``.** Same reason,
-   different artifact: ``comfy_low.transport`` posts a model run to a
+   different artifact: ``turbine_low.transport`` posts a model run to a
    hand-written path constant and a hand-written host constant. The spec
    declares both -- the path whose ``post.operationId`` is ``runRouterModel``,
    and ``servers[0].url``. A sync that *moves* the route (the ``/v1`` -> ``/v2``
@@ -45,12 +45,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-COMMITTED = ROOT / "src" / "comfy_low" / "models" / "_generated.py"
+COMMITTED = ROOT / "src" / "turbine_low" / "models" / "_generated.py"
 ROUTER_SPEC = ROOT / "spec" / "router-openapi.yaml"
 
 #: The media types ``runRouterModel``'s ``200`` is expected to declare, sorted.
 #: This is not a restatement of the spec for its own sake: it is the shape
-#: ``comfy_low.transport._Prepared.parse_run_result`` is written against -- one
+#: ``turbine_low.transport._Prepared.parse_run_result`` is written against -- one
 #: JSON branch that decodes to a ``dict``, one catch-all binary branch that
 #: comes back as a ``BinaryResult``. Unlike the path and host below, there is no
 #: constant in the SDK to compare against, because the branch is control flow
@@ -71,7 +71,7 @@ def _generate(out: Path) -> None:
             "--output-model-type",
             "pydantic_v2.BaseModel",
             "--target-python-version",
-            "3.10",
+            "3.11",
             "--use-standard-collections",
             "--use-union-operator",
             "--use-schema-description",
@@ -257,9 +257,9 @@ def _check_router_run_route() -> int:
         return 1
     sys.path.insert(0, str(ROOT / "src"))
     try:
-        from comfy_low.transport import _MODEL_RUN_PATH_TEMPLATE, ROUTER_BASE_URL
+        from turbine_low.transport import _MODEL_RUN_PATH_TEMPLATE, ROUTER_BASE_URL
     except Exception as exc:
-        print(f"ERROR: comfy_low.transport does not import: {exc!r}", file=sys.stderr)
+        print(f"ERROR: turbine_low.transport does not import: {exc!r}", file=sys.stderr)
         return 1
 
     try:
@@ -274,7 +274,7 @@ def _check_router_run_route() -> int:
             f"ERROR: the model-run 200's media types have drifted from {ROUTER_SPEC.name}.\n"
             f"  spec (runRouterModel 200 content): {declared_media}\n"
             f"  sdk  (the branches parse_run_result takes): {_BOUND_RUN_MEDIA_TYPES}\n"
-            "  comfy_low.transport._Prepared.parse_run_result decodes an "
+            "  turbine_low.transport._Prepared.parse_run_result decodes an "
             "'application/json' success to a dict and returns anything else as a "
             "BinaryResult. A branch added or removed upstream changes what "
             "post_model_run returns, so reconcile it rather than widening this list.",
@@ -286,7 +286,7 @@ def _check_router_run_route() -> int:
             f"ERROR: the bound model-run route has drifted from {ROUTER_SPEC.name}.\n"
             f"  spec (runRouterModel): {declared_path}\n"
             f"  sdk  (_MODEL_RUN_PATH_TEMPLATE): {_MODEL_RUN_PATH_TEMPLATE}\n"
-            "  Update comfy_low.transport._MODEL_RUN_PATH_TEMPLATE to the spec's path.",
+            "  Update turbine_low.transport._MODEL_RUN_PATH_TEMPLATE to the spec's path.",
             file=sys.stderr,
         )
         failed = True
@@ -295,7 +295,7 @@ def _check_router_run_route() -> int:
             f"ERROR: the default router host has drifted from {ROUTER_SPEC.name}.\n"
             f"  spec (servers[0].url): {declared_host}\n"
             f"  sdk  (ROUTER_BASE_URL): {ROUTER_BASE_URL}\n"
-            "  Update comfy_low.transport.ROUTER_BASE_URL to the spec's server URL.",
+            "  Update turbine_low.transport.ROUTER_BASE_URL to the spec's server URL.",
             file=sys.stderr,
         )
         failed = True
@@ -317,12 +317,12 @@ def _check_models() -> int:
         _generate(fresh)
         if fresh.read_text() != COMMITTED.read_text():
             print(
-                "ERROR: comfy_low models are stale.\n"
-                "Run scripts/gen_models.sh and commit src/comfy_low/models/_generated.py.",
+                "ERROR: turbine_low models are stale.\n"
+                "Run scripts/gen_models.sh and commit src/turbine_low/models/_generated.py.",
                 file=sys.stderr,
             )
             return 1
-    print("OK: comfy_low models are in sync with spec/openapi.yaml")
+    print("OK: turbine_low models are in sync with spec/openapi.yaml")
     return 0
 
 
@@ -334,7 +334,7 @@ def _check_router_error_types() -> int:
     # runs (and still reports) when the package itself will not import.
     sys.path.insert(0, str(ROOT / "src"))
     try:
-        from comfy_sdk.router_exceptions import (
+        from turbine_sdk.router_exceptions import (
             ROUTER_ERROR_TYPES,
             _meaning_digest,
             exception_for,
@@ -342,7 +342,7 @@ def _check_router_error_types() -> int:
     except Exception as exc:
         # This check supervises that very module, so a syntax or import error
         # in it is the failure to report, not a traceback to leak.
-        print(f"ERROR: comfy_sdk.router_exceptions does not import: {exc!r}", file=sys.stderr)
+        print(f"ERROR: turbine_sdk.router_exceptions does not import: {exc!r}", file=sys.stderr)
         return 1
 
     try:
@@ -362,7 +362,8 @@ def _check_router_error_types() -> int:
         if missing:
             print(
                 f"  declared in the spec, no class in the SDK: {', '.join(missing)}\n"
-                "  Add one RouterError subclass per value to src/comfy_sdk/router_exceptions.py,\n"
+                "  Add one RouterError subclass per value to\n"
+                "  src/turbine_sdk/router_exceptions.py,\n"
                 "  named as the PascalCase of the wire value, with the spec's `meaning`\n"
                 "  as its docstring, then set `_spec_meaning_digest` on it -- the digest\n"
                 "  pass below runs once these lists match and will fail on the next run\n"
@@ -424,7 +425,7 @@ def _check_router_error_types() -> int:
                 head = f"  {value}: {name} is blessed against {blessed!r}"
             print(
                 f"{head}, and the spec's `meaning` hashes to {expected!r}.\n"
-                f"  Re-read {name}'s docstring in src/comfy_sdk/router_exceptions.py against "
+                f"  Re-read {name}'s docstring in src/turbine_sdk/router_exceptions.py against "
                 "that entry's `meaning`\n"
                 "  and update the docstring if the semantics moved, then set\n"
                 f'      _spec_meaning_digest: str = "{expected}"\n'
@@ -434,7 +435,7 @@ def _check_router_error_types() -> int:
         return 1
 
     print(
-        f"OK: comfy_sdk.router_exceptions covers all {len(declared)} error types "
+        f"OK: turbine_sdk.router_exceptions covers all {len(declared)} error types "
         "in spec/router-openapi.yaml, each blessed against that entry's `meaning`"
     )
     return 0

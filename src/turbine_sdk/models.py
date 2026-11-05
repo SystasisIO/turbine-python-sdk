@@ -1,7 +1,7 @@
 """The ``models`` namespace — ``client.models`` on an existing client.
 
-Reached from a client you already constructed (``Comfy().models`` /
-``AsyncComfy().models``) rather than built on its own, so it uses that client's
+Reached from a client you already constructed (``Turbine().models`` /
+``AsyncTurbine().models``) rather than built on its own, so it uses that client's
 credentials, transport and timeout: one connection pool, one credential, one
 place to configure both. A separate client object for model operations would
 fork all of that, which is what namespacing avoids.
@@ -10,7 +10,7 @@ The one setting it does *not* share is the target host. Model runs go to Comfy
 Router — ``POST {router_base_url}/v2/models/{provider}/{model}``, the partner
 model's native JSON straight through — while the client's ``base_url`` names
 the ``/api/v2`` deployment serving jobs and assets. So ``models.base_url``
-reports ``COMFY_ROUTER_BASE_URL`` (default ``https://api.comfy.org``), and a
+reports the explicitly configured ``router_base_url``, and a
 ``model`` argument is the canonical two-segment ``{provider}/{model}`` id that
 addresses the route.
 
@@ -22,22 +22,22 @@ are added to this object as they land, never to a parallel client.
 
 The namespace also carries the client's retry policy, for the same reason it
 carries its transport: a retry is part of how a call is made, not a per-call
-decision a caller should have to repeat. See :mod:`comfy_sdk.retry` for what is
+decision a caller should have to repeat. See :mod:`turbine_sdk.retry` for what is
 retried and why one logical call keeps one ``Idempotency-Key`` across every
 attempt.
 
 ``run`` is the one model operation today, and it exists in exactly one form per
-client: ``Comfy().models.run(...)`` blocks, ``AsyncComfy().models.run(...)`` is
+client: ``Turbine().models.run(...)`` blocks, ``AsyncTurbine().models.run(...)`` is
 awaited. **The awaitable form is the async client, not a suffixed method** —
 there is deliberately no ``run_async``, and there never will be: two names for
 one operation is a published signature that cannot be withdrawn once released.
 ``tests/test_models_run.py`` asserts the suffix's absence rather than leaving it
 to convention.
 
-Callers do not import anything for this: ``from comfy_sdk import Comfy`` stays
+Callers do not import anything for this: ``from turbine_sdk import Turbine`` stays
 the only entry point, and ``client.models`` is the whole surface. The one name
-worth importing is :class:`~comfy_low.transport.BinaryResult`, re-exported here
-and from ``comfy_sdk``, for an ``isinstance`` check on a run whose model answers
+worth importing is :class:`~turbine_low.transport.BinaryResult`, re-exported here
+and from ``turbine_sdk``, for an ``isinstance`` check on a run whose model answers
 in bytes rather than JSON.
 """
 
@@ -53,15 +53,15 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
-import httpx
+import httpx2
 
-from comfy_low.errors import ApiError
-from comfy_low.errors import IdempotencyKeyReuse as ProtocolIdempotencyKeyReuse
-from comfy_low.transport import (
+from turbine_low.errors import ApiError
+from turbine_low.errors import IdempotencyKeyReuse as ProtocolIdempotencyKeyReuse
+from turbine_low.transport import (
     MODEL_RUN_TIMEOUT,
-    AsyncComfyLow,
+    AsyncTurbineLow,
     BinaryResult,
-    ComfyLow,
+    TurbineLow,
     parse_model_id,
     parse_request_id,
 )
@@ -91,24 +91,24 @@ from .router_exceptions import RouterError
 
 #: Failures the policy is even asked about. A protocol ``ApiError`` is a
 #: response the server sent, a ``RouterError`` is the same thing modelled by
-#: this surface's own typed hierarchy, and an ``httpx.TransportError`` is no
+#: this surface's own typed hierarchy, and an ``httpx2.TransportError`` is no
 #: response at all. Being in this tuple is not "retryable" — most of these are
 #: not, and :meth:`RetryPolicy.should_retry` decides which. What it buys is
 #: that anything *else* propagates untouched, so a bug in the SDK itself is
 #: never mistaken for a flaky network and quietly re-run.
 #:
 #: ``RouterError`` is listed even though ``post_model_run`` raises ``ApiError``
-#: today: the typed errors in :mod:`comfy_sdk.router_exceptions` were built for
-#: this very surface and derive from ``ComfyError``, not ``ApiError``, so
+#: today: the typed errors in :mod:`turbine_sdk.router_exceptions` were built for
+#: this very surface and derive from ``TurbineError``, not ``ApiError``, so
 #: omitting them would make :meth:`RetryPolicy.should_retry`'s router branch
 #: unreachable and turn retry into a silent no-op the day this route starts
 #: raising them, with no test failing.
-_CANDIDATE_FAILURES = (ApiError, RouterError, httpx.TransportError)
+_CANDIDATE_FAILURES = (ApiError, RouterError, httpx2.TransportError)
 
 #: The answer that means the resend was never going to work: the server refused
 #: the *key*, not the request. ``422`` is the v2 jobs rule
 #: (single-use, reject-on-duplicate), which a deployment named by
-#: ``COMFY_ROUTER_BASE_URL`` may apply to this route even though the router
+#: an explicitly configured ``router_base_url`` may apply to this route even though the router
 #: contract does not.
 _KEY_REUSE_STATUS = 422
 _KEY_REUSE_CODE = "idempotency_key_reuse"
@@ -122,14 +122,14 @@ def _is_key_reuse(exc: BaseException) -> bool:
     Matched on the wire facts — ``422`` plus the ``idempotency_key_reuse``
     code — rather than on a class alone, because the retry loop runs *inside*
     ``translating()``: what it catches is the raw
-    :class:`comfy_low.errors.ApiError`, and only the copy that leaves the block
-    is the idiomatic :class:`~comfy_sdk.exceptions.IdempotencyKeyReuse`. Either
+    :class:`turbine_low.errors.ApiError`, and only the copy that leaves the block
+    is the idiomatic :class:`~turbine_sdk.exceptions.IdempotencyKeyReuse`. Either
     layer's typed class is accepted outright so the answer does not depend on
     which one raised.
 
-    The SDK-level :class:`~comfy_sdk.exceptions.IdempotencyKeyReuse` arm is
+    The SDK-level :class:`~turbine_sdk.exceptions.IdempotencyKeyReuse` arm is
     deliberately defensive, not reachable from the retry loops as written:
-    that class derives from ``ComfyError`` alone, so the ``except
+    that class derives from ``TurbineError`` alone, so the ``except
     _CANDIDATE_FAILURES`` clauses that call this can only ever bind the
     protocol copy. It is kept so this predicate stays correct if it is ever
     called from outside those clauses.
@@ -149,7 +149,7 @@ def _as_sdk_error(exc: BaseException, idempotency_key: str) -> BaseException:
     nothing else — so an ``ApiError`` chained onto that one as ``__cause__``
     would reach the caller as a raw protocol type this SDK otherwise never
     shows. Both halves of the substitution below therefore go through here
-    first. Anything already idiomatic (a ``RouterError``, an ``httpx`` failure
+    first. Anything already idiomatic (a ``RouterError``, an ``httpx2`` failure
     with no response to translate) is only stamped.
 
     The translated copy inherits the original's traceback, so the chain still
@@ -169,7 +169,7 @@ def _resend_refused(exc: BaseException) -> BaseException:
     fresh one, and re-entering :meth:`Models.run` mints a *new* key — the second
     billed generation. The flag is the cheap way to tell them apart without
     walking ``__cause__``; see
-    :attr:`comfy_sdk.exceptions.ComfyError.resend_refused`.
+    :attr:`turbine_sdk.exceptions.TurbineError.resend_refused`.
     """
     exc.resend_refused = True  # type: ignore[attr-defined]
     return exc
@@ -178,23 +178,22 @@ def _resend_refused(exc: BaseException) -> BaseException:
 class _ModelsBase:
     """Read-only view of the configuration inherited from the host client."""
 
-    _low: ComfyLow | AsyncComfyLow
+    _low: TurbineLow | AsyncTurbineLow
     _retry: RetryPolicy
 
     @property
-    def base_url(self) -> str:
+    def base_url(self) -> str | None:
         """Comfy Router's base URL — where model requests are sent.
 
         Not the host client's ``base_url``: a model run is a model-ID-addressed
-        route on Comfy Router (``https://api.comfy.org`` by default, redirected
-        by ``COMFY_ROUTER_BASE_URL``), while the client's own ``base_url`` names
+        route on the explicitly enabled Comfy Router, while the client's own ``base_url`` names
         the ``/api/v2`` deployment that serves jobs and assets. Read live off
         the shared transport, exactly as :attr:`timeout` is.
         """
         return self._low.router_base_url
 
     @property
-    def timeout(self) -> httpx.Timeout:
+    def timeout(self) -> httpx2.Timeout:
         """The host client's HTTP timeout, read live from its transport."""
         return self._low.timeout
 
@@ -238,7 +237,7 @@ class RouterRunResult:
     """The partner model's native output, exactly what :meth:`Models.run` returns.
 
     A ``dict`` for a model whose partner answers JSON, and a
-    :class:`~comfy_sdk.BinaryResult` for one whose partner answers a generation
+    :class:`~turbine_sdk.BinaryResult` for one whose partner answers a generation
     directly as bytes — the same two shapes, decided the same way, as
     :meth:`Models.run`. ``run_detailed`` adds the Router disclosures beside the
     output; it does not change what the output is.
@@ -354,7 +353,7 @@ def _credits_used(raw: str | None) -> str | None:
     values do exactly that, and none needs a misbehaving server:
 
     * an empty or whitespace-only header, which arrives as ``""``;
-    * a repeated header, which ``httpx.Headers.get`` joins with ``", "`` --
+    * a repeated header, which ``httpx2.Headers.get`` joins with ``", "`` --
       so a doubled stamp reads ``"1.25, 1.25"``;
     * ``NaN`` / ``Infinity``, which ``Decimal`` accepts *silently* and which
       then poison every later comparison and ``quantize``.
@@ -394,13 +393,13 @@ def _run_result(body: dict[str, Any] | BinaryResult, headers: Mapping[str, str])
 
 
 class Models(_ModelsBase):
-    """``client.models`` on :class:`~comfy_sdk.client.Comfy`.
+    """``client.models`` on :class:`~turbine_sdk.client.Turbine`.
 
     Constructed by the client; ``low`` is the client's own transport, which is
     what makes the configuration shared rather than duplicated.
     """
 
-    def __init__(self, low: ComfyLow, retry: RetryPolicy = DEFAULT_RETRY) -> None:
+    def __init__(self, low: TurbineLow, retry: RetryPolicy = DEFAULT_RETRY) -> None:
         self._low = low
         self._retry = retry
 
@@ -413,7 +412,7 @@ class Models(_ModelsBase):
         model_provider: str | None = None,
         strict_mode: bool | None = None,
         fallback_provider: bool | str | None = None,
-        timeout: float | httpx.Timeout | None = MODEL_RUN_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = MODEL_RUN_TIMEOUT,
     ) -> tuple[dict[str, Any] | BinaryResult, Mapping[str, str]]:
         """Run ``model`` with ``arguments`` and return the completed result.
 
@@ -452,7 +451,7 @@ class Models(_ModelsBase):
         polling happens server side inside this call, invisible to the caller.
         There is no separate submit/await step and no ``run_async`` variant: the
         awaitable form of this method is :meth:`AsyncModels.run` on
-        ``AsyncComfy``.
+        ``AsyncTurbine``.
 
         The return value is the provider's own payload, handed back as-is. It
         comes in **two shapes**, decided by the response's ``Content-Type``,
@@ -462,7 +461,7 @@ class Models(_ModelsBase):
         * a ``dict`` — the provider's JSON document, decoded, with its own field
           names untouched. This is what all but a couple of models in the
           catalog return, and it is unchanged from previous releases.
-        * a :class:`~comfy_low.transport.BinaryResult` — for a model whose
+        * a :class:`~turbine_low.transport.BinaryResult` — for a model whose
           partner answers a generation directly as bytes (the ElevenLabs audio
           models are the first of these). ``result.content`` is the file bytes
           exactly as they arrived, ``result.content_type`` the media type the
@@ -477,10 +476,10 @@ class Models(_ModelsBase):
         is still an error rather than bytes.
 
         Because the server may legitimately hold the connection for minutes,
-        ``timeout`` defaults to :data:`~comfy_low.transport.MODEL_RUN_TIMEOUT`
+        ``timeout`` defaults to :data:`~turbine_low.transport.MODEL_RUN_TIMEOUT`
         (10 minutes) rather than the client's own default, which is sized for
         ordinary API calls and would abort a healthy run. Pass a number of
-        seconds, an ``httpx.Timeout``, or ``None`` to wait indefinitely.
+        seconds, an ``httpx2.Timeout``, or ``None`` to wait indefinitely.
 
         An ``Idempotency-Key`` is sent on every run; a fresh one is minted per
         call unless ``idempotency_key`` is given, so an accidental exact resend
@@ -508,7 +507,7 @@ class Models(_ModelsBase):
         5xx that named no such pace, and a client-side timeout — those leave the
         outcome genuinely unknown and need
         ``RetryPolicy(retry_possibly_in_flight=True)``. See
-        :mod:`comfy_sdk.retry`, and ``Comfy(retry=NO_RETRY)`` to switch it off.
+        :mod:`turbine_sdk.retry`, and ``Turbine(retry=NO_RETRY)`` to switch it off.
 
         **When a resend is refused because the key was already claimed
         (``422`` ``idempotency_key_reuse``), what is raised is the failure that
@@ -578,8 +577,8 @@ class Models(_ModelsBase):
                 fallback_provider=fallback_provider,
             )
 
-        Note that a dropped connection surfaces as an ``httpx`` error rather
-        than a :class:`~comfy_sdk.ComfyError` — it never reached a response to
+        Note that a dropped connection surfaces as an ``httpx2`` error rather
+        than a :class:`~turbine_sdk.TurbineError` — it never reached a response to
         translate — so a handler written for the replay has to catch both; see
         the README's "Collecting a generation after a lost response".
 
@@ -594,10 +593,10 @@ class Models(_ModelsBase):
         ``None``. This parameter treats ``None`` as "mint one", so replaying
         with a key that was never recorded silently starts a *second* billed
         generation instead of collecting the first. Every exception *this*
-        method raises carries a real key, but an ``except ComfyError`` that also
+        method raises carries a real key, but an ``except TurbineError`` that also
         catches errors from other surfaces can hand you one that does not.
         """
-        low = cast(ComfyLow, self._low)
+        low = cast(TurbineLow, self._low)
         # Minted once, outside the loop: reusing this exact value on every
         # attempt is the whole reason a retry here is not a second charge.
         key = (
@@ -664,7 +663,7 @@ class Models(_ModelsBase):
         model_provider: str | None = None,
         strict_mode: bool | None = None,
         fallback_provider: bool | str | None = None,
-        timeout: float | httpx.Timeout | None = MODEL_RUN_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = MODEL_RUN_TIMEOUT,
     ) -> dict[str, Any] | BinaryResult:
         """Run ``model`` with ``arguments`` and return the partner's native output.
 
@@ -672,7 +671,7 @@ class Models(_ModelsBase):
         result document alone.
 
         The result is a ``dict`` for a model whose partner answers JSON and a
-        :class:`~comfy_sdk.BinaryResult` for one whose partner answers a
+        :class:`~turbine_sdk.BinaryResult` for one whose partner answers a
         generation directly as bytes, branched on the response ``Content-Type``
         exactly as the run route's published ``200`` says a client must.
 
@@ -703,7 +702,7 @@ class Models(_ModelsBase):
         model_provider: str | None = None,
         strict_mode: bool | None = None,
         fallback_provider: bool | str | None = None,
-        timeout: float | httpx.Timeout | None = MODEL_RUN_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = MODEL_RUN_TIMEOUT,
     ) -> RouterRunResult:
         """:meth:`run`, plus what Router disclosed about how the call ran.
 
@@ -740,7 +739,7 @@ class Models(_ModelsBase):
         is the partner model's own native JSON input, forwarded unchanged. The
         difference is when the server answers — here, as soon as the request is
         *accepted*, with the generation collected later through the returned
-        :class:`~comfy_sdk.model_requests.RequestHandle`.
+        :class:`~turbine_sdk.model_requests.RequestHandle`.
 
         Reach for it over :meth:`run` when the caller cannot hold a connection
         for the length of a generation: a web request that has to return now, a
@@ -763,7 +762,7 @@ class Models(_ModelsBase):
 
         The surface is gated server side: a caller the queue is not switched on
         for is answered ``403`` ``not_enabled``, which arrives here as
-        :class:`~comfy_sdk.router_exceptions.NotEnabled`. Nothing about the
+        :class:`~turbine_sdk.router_exceptions.NotEnabled`. Nothing about the
         request is wrong in that case, and it is terminal — do not retry it.
         The same ``not_enabled`` also refuses a *model* whose partner answers a
         generation directly as bytes: such a model cannot yet be queued, nothing
@@ -771,10 +770,10 @@ class Models(_ModelsBase):
         ``detail`` before concluding the caller is not switched on. A caller
         with too many requests already waiting is refused ``429``
         ``queue_backlog_full``
-        (:class:`~comfy_sdk.router_exceptions.QueueBacklogFull`), which clears
+        (:class:`~turbine_sdk.router_exceptions.QueueBacklogFull`), which clears
         as its own queued requests finish.
         """
-        low = cast(ComfyLow, self._low)
+        low = cast(TurbineLow, self._low)
         key = (
             validate_idempotency_key(idempotency_key)
             if idempotency_key is not None
@@ -811,7 +810,7 @@ class Models(_ModelsBase):
         """Queue a request, follow it to completion, and return its result.
 
         :meth:`submit` plus polling plus
-        :meth:`~comfy_sdk.model_requests.RequestHandle.get`, in one call — the
+        :meth:`~turbine_sdk.model_requests.RequestHandle.get`, in one call — the
         ergonomic form for a caller who does want to wait but also wants to
         show progress while waiting. The return value is the provider's own
         payload, identical to what :meth:`run` would have returned — a ``dict``
@@ -819,7 +818,7 @@ class Models(_ModelsBase):
         answers a generation directly as bytes.
 
         ``on_queue_update`` is called with a
-        :class:`~comfy_sdk.model_requests.QueueUpdate` each time the queue
+        :class:`~turbine_sdk.model_requests.QueueUpdate` each time the queue
         moves — first observation, every change of status or position, and the
         completion. It is called from this thread, so keep it quick; an
         exception it raises propagates and abandons the wait (the request keeps
@@ -830,7 +829,7 @@ class Models(_ModelsBase):
         running, then every poll, retry and pause, and the result fetch — with
         no server-side meaning: the queue's own timeouts are the server's.
         When it runs out this makes a best-effort
-        :meth:`~comfy_sdk.model_requests.RequestHandle.cancel` — so a caller
+        :meth:`~turbine_sdk.model_requests.RequestHandle.cancel` — so a caller
         that has stopped waiting is not also still paying for a generation
         nobody will collect — and then raises ``TimeoutError``. Best-effort is
         literal: a cancel that itself fails is swallowed, because the timeout
@@ -884,10 +883,10 @@ class Models(_ModelsBase):
         Takes no state beyond the two ids that address the request, so a
         process that never made the submit — a worker draining a queue of ids,
         a retry after a restart — reaches the same
-        :class:`~comfy_sdk.model_requests.RequestHandle` the submitting process
+        :class:`~turbine_sdk.model_requests.RequestHandle` the submitting process
         held. Makes no request of its own: an id that names nothing surfaces on
-        the first :meth:`~comfy_sdk.model_requests.RequestHandle.status` or
-        :meth:`~comfy_sdk.model_requests.RequestHandle.get`, as the server's
+        the first :meth:`~turbine_sdk.model_requests.RequestHandle.status` or
+        :meth:`~turbine_sdk.model_requests.RequestHandle.get`, as the server's
         own answer rather than as a guess made here.
 
         Both ids are validated locally — a malformed ``{provider}/{model}`` id
@@ -897,7 +896,7 @@ class Models(_ModelsBase):
         """
         parse_model_id(model)
         parse_request_id(request_id)
-        return RequestHandle(cast(ComfyLow, self._low), model, request_id, self._retry)
+        return RequestHandle(cast(TurbineLow, self._low), model, request_id, self._retry)
 
     # -- discovery: what can run, and what it takes ------------------------
     def list(
@@ -905,13 +904,13 @@ class Models(_ModelsBase):
         *,
         cursor: str | None = None,
         limit: int | None = None,
-        timeout: float | httpx.Timeout | None = DISCOVERY_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = DISCOVERY_TIMEOUT,
     ) -> ModelList:
         """The Router model catalog — every model this client can :meth:`run`.
 
         ``GET {router_base_url}/v2/models``, with the same host and credential
         as :meth:`run`. Iterate the returned
-        :class:`~comfy_sdk.model_catalog.ModelList` to walk the whole catalog —
+        :class:`~turbine_sdk.model_catalog.ModelList` to walk the whole catalog —
         it follows ``next_cursor`` page by page while ``has_more`` is true — or
         call its ``page()`` for exactly one page plus ``has_more``,
         ``next_cursor``, the ``limit`` actually served, and ``request_id``.
@@ -924,13 +923,13 @@ class Models(_ModelsBase):
         page. Each is sent only when set.
 
         ``timeout`` bounds each page request, defaulting to 30 seconds
-        (:data:`~comfy_low.transport.DISCOVERY_TIMEOUT`); pass seconds, an
-        ``httpx.Timeout``, or ``None`` to wait indefinitely. A failure raises
-        the same typed :class:`~comfy_sdk.router_exceptions.RouterError`
+        (:data:`~turbine_low.transport.DISCOVERY_TIMEOUT`); pass seconds, an
+        ``httpx2.Timeout``, or ``None`` to wait indefinitely. A failure raises
+        the same typed :class:`~turbine_sdk.router_exceptions.RouterError`
         subclass :meth:`run` would, read off ``X-Comfy-Error-Type``.
         """
         return ModelList(
-            cast(ComfyLow, self._low), self._retry, cursor=cursor, limit=limit, timeout=timeout
+            cast(TurbineLow, self._low), self._retry, cursor=cursor, limit=limit, timeout=timeout
         )
 
     def schema(
@@ -938,7 +937,7 @@ class Models(_ModelsBase):
         model: str,
         *,
         etag: str | None = None,
-        timeout: float | httpx.Timeout | None = DISCOVERY_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = DISCOVERY_TIMEOUT,
     ) -> SchemaResult:
         """``model``'s input and output schemas, as a standalone OpenAPI document.
 
@@ -946,7 +945,7 @@ class Models(_ModelsBase):
         ``model`` is the same canonical ``{provider}/{model}`` id :meth:`run`
         takes, validated the same way before any request.
 
-        Returns a :class:`~comfy_sdk.model_catalog.SchemaResult` carrying the
+        Returns a :class:`~turbine_sdk.model_catalog.SchemaResult` carrying the
         parsed ``document``, its ``etag`` and the ``request_id``. Pass a stored
         ``etag`` to make the read conditional (``If-None-Match``): when the
         document has not changed the server answers ``304`` with no body, and
@@ -954,16 +953,18 @@ class Models(_ModelsBase):
         exception. The SDK keeps no cache; storing the tag is the caller's.
 
         ``timeout`` defaults to 30 seconds, as on :meth:`list`. An unknown
-        model raises :class:`~comfy_sdk.router_exceptions.ModelNotFound`, and
+        model raises :class:`~turbine_sdk.router_exceptions.ModelNotFound`, and
         every other failure the typed Router exception :meth:`run` would.
         """
-        return get_schema(cast(ComfyLow, self._low), self._retry, model, etag=etag, timeout=timeout)
+        return get_schema(
+            cast(TurbineLow, self._low), self._retry, model, etag=etag, timeout=timeout
+        )
 
 
 class AsyncModels(_ModelsBase):
-    """``client.models`` on :class:`~comfy_sdk.client.AsyncComfy` — mirrors :class:`Models`."""
+    """``client.models`` on :class:`~turbine_sdk.client.AsyncTurbine` — mirrors :class:`Models`."""
 
-    def __init__(self, low: AsyncComfyLow, retry: RetryPolicy = DEFAULT_RETRY) -> None:
+    def __init__(self, low: AsyncTurbineLow, retry: RetryPolicy = DEFAULT_RETRY) -> None:
         self._low = low
         self._retry = retry
 
@@ -976,18 +977,18 @@ class AsyncModels(_ModelsBase):
         model_provider: str | None = None,
         strict_mode: bool | None = None,
         fallback_provider: bool | str | None = None,
-        timeout: float | httpx.Timeout | None = MODEL_RUN_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = MODEL_RUN_TIMEOUT,
     ) -> tuple[dict[str, Any] | BinaryResult, Mapping[str, str]]:
         """Awaitable :meth:`Models.run` — same arguments, same result shape.
 
-        This *is* the async form of ``run``: awaiting it on ``AsyncComfy`` is
+        This *is* the async form of ``run``: awaiting it on ``AsyncTurbine`` is
         the whole difference from the sync client — including the model-id
         rule, the retry policy, the one-key-per-call rule, the failure raised
         when a resend is refused for key reuse, and the ``.idempotency_key``
         every exception it raises carries for the replay.
         See :meth:`Models.run`.
         """
-        low = cast(AsyncComfyLow, self._low)
+        low = cast(AsyncTurbineLow, self._low)
         key = (
             validate_idempotency_key(idempotency_key)
             if idempotency_key is not None
@@ -1041,7 +1042,7 @@ class AsyncModels(_ModelsBase):
         model_provider: str | None = None,
         strict_mode: bool | None = None,
         fallback_provider: bool | str | None = None,
-        timeout: float | httpx.Timeout | None = MODEL_RUN_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = MODEL_RUN_TIMEOUT,
     ) -> dict[str, Any] | BinaryResult:
         """Awaitable :meth:`Models.run` — same ``dict | BinaryResult`` result."""
         body, _ = await self._run(
@@ -1064,7 +1065,7 @@ class AsyncModels(_ModelsBase):
         model_provider: str | None = None,
         strict_mode: bool | None = None,
         fallback_provider: bool | str | None = None,
-        timeout: float | httpx.Timeout | None = MODEL_RUN_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = MODEL_RUN_TIMEOUT,
     ) -> RouterRunResult:
         """Awaitable :meth:`Models.run_detailed` — same arguments, same result shape."""
         body, headers = await self._run(
@@ -1090,7 +1091,7 @@ class AsyncModels(_ModelsBase):
         Including the fresh-key-per-call rule and the ``.idempotency_key`` every
         exception carries for a lost-response recovery. See :meth:`Models.submit`.
         """
-        low = cast(AsyncComfyLow, self._low)
+        low = cast(AsyncTurbineLow, self._low)
         key = (
             validate_idempotency_key(idempotency_key)
             if idempotency_key is not None
@@ -1182,7 +1183,7 @@ class AsyncModels(_ModelsBase):
         """
         parse_model_id(model)
         parse_request_id(request_id)
-        return AsyncRequestHandle(cast(AsyncComfyLow, self._low), model, request_id, self._retry)
+        return AsyncRequestHandle(cast(AsyncTurbineLow, self._low), model, request_id, self._retry)
 
     # -- discovery: what can run, and what it takes ------------------------
     def list(
@@ -1190,18 +1191,22 @@ class AsyncModels(_ModelsBase):
         *,
         cursor: str | None = None,
         limit: int | None = None,
-        timeout: float | httpx.Timeout | None = DISCOVERY_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = DISCOVERY_TIMEOUT,
     ) -> AsyncModelList:
-        """The Router model catalog on ``AsyncComfy`` — see :meth:`Models.list`.
+        """The Router model catalog on ``AsyncTurbine`` — see :meth:`Models.list`.
 
         Not itself awaited: it returns an
-        :class:`~comfy_sdk.model_catalog.AsyncModelList` at once, which
+        :class:`~turbine_sdk.model_catalog.AsyncModelList` at once, which
         ``async for`` walks page by page and whose ``page()`` is awaited for a
         single page. That keeps ``async for m in client.models.list():`` the
         one-liner it is in the sync client.
         """
         return AsyncModelList(
-            cast(AsyncComfyLow, self._low), self._retry, cursor=cursor, limit=limit, timeout=timeout
+            cast(AsyncTurbineLow, self._low),
+            self._retry,
+            cursor=cursor,
+            limit=limit,
+            timeout=timeout,
         )
 
     async def schema(
@@ -1209,11 +1214,11 @@ class AsyncModels(_ModelsBase):
         model: str,
         *,
         etag: str | None = None,
-        timeout: float | httpx.Timeout | None = DISCOVERY_TIMEOUT,
+        timeout: float | httpx2.Timeout | None = DISCOVERY_TIMEOUT,
     ) -> SchemaResult:
         """Awaitable :meth:`Models.schema` — same arguments, same result."""
         return await aget_schema(
-            cast(AsyncComfyLow, self._low), self._retry, model, etag=etag, timeout=timeout
+            cast(AsyncTurbineLow, self._low), self._retry, model, etag=etag, timeout=timeout
         )
 
 

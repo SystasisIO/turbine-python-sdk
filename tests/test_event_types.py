@@ -6,8 +6,8 @@ data; the `log` event type and the preview base64-decode guard had no coverage.
 
 from __future__ import annotations
 
-from comfy_low.sse import RawEvent
-from comfy_sdk.events import Log, Preview, event_from_raw
+from turbine_low.sse import RawEvent
+from turbine_sdk.events import Log, Preview, event_from_raw
 
 
 def _binder(model):  # only OutputReady needs a real binder; unused here

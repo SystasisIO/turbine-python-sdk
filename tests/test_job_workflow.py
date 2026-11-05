@@ -7,17 +7,17 @@ from __future__ import annotations
 
 import pytest
 
-from comfy_sdk import AsyncComfy, Comfy, JobWorkflow, NotFound
+from turbine_sdk import AsyncTurbine, JobWorkflow, NotFound, Turbine
 
 
-def _wf(client: Comfy | AsyncComfy):
+def _wf(client: Turbine | AsyncTurbine):
     return client.workflows.from_json({"3": {"class_type": "KSampler", "inputs": {}}})
 
 
 def test_get_workflow_returns_api_format(server) -> None:
     server.state.job_workflow_format = "api"
     server.state.job_workflow_graph = {"3": {"class_type": "KSampler", "inputs": {}}}
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         wf = job.get_workflow()
     assert isinstance(wf, JobWorkflow)
@@ -35,7 +35,7 @@ def test_get_workflow_returns_save_format(server) -> None:
         "links": [],
         "last_node_id": 3,
     }
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         wf = job.get_workflow()
     assert wf.format == "save"
@@ -45,7 +45,7 @@ def test_get_workflow_returns_save_format(server) -> None:
 def test_get_workflow_on_job_rehydrated_by_id(server) -> None:
     # The motivating case: a job the SDK did not submit in this process (e.g.
     # rehydrated purely by id via client.jobs.get) still exposes its workflow.
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         submitted = client.submit(_wf(client))
         rehydrated = client.jobs.get(submitted.id)
         wf = rehydrated.get_workflow()
@@ -54,7 +54,7 @@ def test_get_workflow_on_job_rehydrated_by_id(server) -> None:
 
 def test_get_workflow_not_found_raises_sdk_not_found(server) -> None:
     server.state.job_workflow_not_found = True
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         with pytest.raises(NotFound):
             job.get_workflow()
@@ -63,7 +63,7 @@ def test_get_workflow_not_found_raises_sdk_not_found(server) -> None:
 async def test_async_get_workflow_mirrors_sync(server) -> None:
     server.state.job_workflow_format = "save"
     server.state.job_workflow_graph = {"nodes": [], "links": [], "last_node_id": 0}
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         wf = await job.get_workflow()
     assert wf.format == "save"
@@ -72,7 +72,7 @@ async def test_async_get_workflow_mirrors_sync(server) -> None:
 
 async def test_async_get_workflow_not_found_raises_sdk_not_found(server) -> None:
     server.state.job_workflow_not_found = True
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         with pytest.raises(NotFound):
             await job.get_workflow()

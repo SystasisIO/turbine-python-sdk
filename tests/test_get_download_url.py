@@ -1,6 +1,6 @@
 """``get_download_url()`` — a directly-fetchable URL without streaming bytes.
 
-Covers both shapes a backend can answer with (see ``comfy_low.transport.
+Covers both shapes a backend can answer with (see ``turbine_low.transport.
 get_asset_content_url``): a redirect to a signed URL (Cloud/serverless, backed
 by object storage) and an inline 200/206 body (self-hosted, no redirect at
 all) — plus that each output on a multi-output job resolves its own distinct
@@ -10,12 +10,12 @@ the redirect is never followed.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from conftest import _output_json
 
-from comfy_low.transport import AsyncComfyLow, ComfyLow, parse_expiry
-from comfy_sdk import AsyncComfy, Comfy, DownloadUrl
+from turbine_low.transport import AsyncTurbineLow, TurbineLow, parse_expiry
+from turbine_sdk import AsyncTurbine, DownloadUrl, Turbine
 
 _SIGNED_URL = (
     "https://storage.googleapis.com/bucket/object"
@@ -28,7 +28,7 @@ _SIGNED_URL = (
 )
 
 
-def _wf(client: Comfy):
+def _wf(client: Turbine):
     return client.workflows.from_json({"3": {"class_type": "KSampler", "inputs": {}}})
 
 
@@ -36,7 +36,7 @@ def _wf(client: Comfy):
 
 
 def test_parse_expiry_reads_goog_date_and_expires() -> None:
-    assert parse_expiry(_SIGNED_URL) == datetime(2026, 7, 10, 19, 0, 0, tzinfo=timezone.utc)
+    assert parse_expiry(_SIGNED_URL) == datetime(2026, 7, 10, 19, 0, 0, tzinfo=UTC)
 
 
 def test_parse_expiry_returns_none_when_params_absent() -> None:
@@ -62,29 +62,29 @@ def test_parse_expiry_returns_none_on_overflowing_expires() -> None:
 
 def test_cloud_redirect_returns_signed_url_and_computed_expiry(server) -> None:
     server.state.redirect_content_to = _SIGNED_URL
-    with ComfyLow(server.base_url) as low:
+    with TurbineLow(server.base_url, router_base_url=server.base_url) as low:
         url, expires_at = low.get_asset_content_url("asset_out_01")
     assert url == _SIGNED_URL
-    assert expires_at == datetime(2026, 7, 10, 19, 0, 0, tzinfo=timezone.utc)
+    assert expires_at == datetime(2026, 7, 10, 19, 0, 0, tzinfo=UTC)
 
 
 async def test_async_cloud_redirect_returns_signed_url_and_computed_expiry(server) -> None:
     server.state.redirect_content_to = _SIGNED_URL
-    async with AsyncComfyLow(server.base_url) as low:
+    async with AsyncTurbineLow(server.base_url, router_base_url=server.base_url) as low:
         url, expires_at = await low.get_asset_content_url("asset_out_01")
     assert url == _SIGNED_URL
-    assert expires_at == datetime(2026, 7, 10, 19, 0, 0, tzinfo=timezone.utc)
+    assert expires_at == datetime(2026, 7, 10, 19, 0, 0, tzinfo=UTC)
 
 
 def test_output_get_download_url_on_cloud_redirect(server) -> None:
     server.state.redirect_content_to = _SIGNED_URL
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         out = job.get_outputs("13")[0]
         download = out.get_download_url()
     assert isinstance(download, DownloadUrl)
     assert download.url == _SIGNED_URL
-    assert download.expires_at == datetime(2026, 7, 10, 19, 0, 0, tzinfo=timezone.utc)
+    assert download.expires_at == datetime(2026, 7, 10, 19, 0, 0, tzinfo=UTC)
 
 
 # -- self-hosted path: inline 200, no redirect -------------------------------
@@ -93,21 +93,21 @@ def test_output_get_download_url_on_cloud_redirect(server) -> None:
 def test_self_hosted_returns_content_url_and_no_expiry(server) -> None:
     # No `redirect_content_to` configured -> the stub serves bytes inline
     # (200), the never-throws / works-everywhere path.
-    with ComfyLow(server.base_url) as low:
+    with TurbineLow(server.base_url, router_base_url=server.base_url) as low:
         url, expires_at = low.get_asset_content_url("asset_out_01")
     assert url == f"{server.base_url}/api/v2/assets/asset_out_01/content"
     assert expires_at is None
 
 
 async def test_async_self_hosted_returns_content_url_and_no_expiry(server) -> None:
-    async with AsyncComfyLow(server.base_url) as low:
+    async with AsyncTurbineLow(server.base_url, router_base_url=server.base_url) as low:
         url, expires_at = await low.get_asset_content_url("asset_out_01")
     assert url == f"{server.base_url}/api/v2/assets/asset_out_01/content"
     assert expires_at is None
 
 
 def test_output_get_download_url_on_self_hosted(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         out = job.get_outputs("13")[0]
         download = out.get_download_url()  # must not throw
@@ -123,7 +123,7 @@ def test_multi_output_job_each_get_download_url_is_distinct(server) -> None:
         _output_json("13", "asset_out_01"),
         _output_json("14", "asset_out_02"),
     ]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         urls = {out.id: out.get_download_url().url for out in job.outputs}
 
@@ -138,7 +138,7 @@ async def test_async_multi_output_job_each_get_download_url_is_distinct(server) 
         _output_json("13", "asset_out_01"),
         _output_json("14", "asset_out_02"),
     ]
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.run(_wf(client))
         urls = {}
         for out in job.outputs:
@@ -157,7 +157,7 @@ def test_redirect_target_never_contacted_bearer_never_leaked(server, second_serv
     redirect_url = f"{second_server.base_url}/api/v2/assets/asset_out_01/content"
     server.state.redirect_content_to = redirect_url
 
-    with Comfy(api_key="ck_super_secret") as client:
+    with Turbine(api_key="ck_super_secret", router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         out = job.get_outputs("13")[0]
         download = out.get_download_url()

@@ -17,18 +17,18 @@ impossible today.
 If you have a shape in mind, sketch it.
 
 ```python
-from comfy_sdk import Comfy
+from turbine_sdk import Turbine
 
-client = Comfy(api_key="comfyui-...")
+client = Turbine(base_url="http://127.0.0.1:8189", api_key=None)
 # ...
 ```
 
 **Which deployment does this matter for**
-Comfy Cloud / serverless / self-hosted — or all of them.
+TurbineOS / another compatible deployment / all supported deployments.
 
 **Describe alternatives you've considered**
 A clear and concise description of any alternative solutions or features you've
-considered, including whether `comfy_low` (the lower-level protocol layer this
+considered, including whether `turbine_low` (the lower-level protocol layer this
 SDK is built on) already covers it.
 
 **Additional context**

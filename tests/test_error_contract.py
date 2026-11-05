@@ -1,6 +1,6 @@
 """The ``translating()`` contract: no public entry point may leak the
-protocol-level ``comfy_low.errors.ApiError`` — every error must surface as its
-``comfy_sdk`` typed equivalent (see ``comfy_sdk.exceptions.translating``).
+protocol-level ``turbine_low.errors.ApiError`` — every error must surface as its
+``turbine_sdk`` typed equivalent (see ``turbine_sdk.exceptions.translating``).
 
 Regression guard for the 10 entry points that used to skip it: the four
 ``outputs.py`` download methods (sync + async), both asset/job factories'
@@ -21,15 +21,15 @@ import io
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
-import comfy_low.transport as low_transport
-from comfy_low.errors import ApiError as LowApiError
-from comfy_low.errors import clean_request_id
-from comfy_sdk import AsyncComfy, Comfy, Forbidden, NotFound
-from comfy_sdk.exceptions import _STAMPED_ATTRIBUTES, ComfyError, translating
-from comfy_sdk.router_exceptions import (
+import turbine_low.transport as low_transport
+from turbine_low.errors import ApiError as LowApiError
+from turbine_low.errors import clean_request_id
+from turbine_sdk import AsyncTurbine, Forbidden, NotFound, Turbine
+from turbine_sdk.exceptions import _STAMPED_ATTRIBUTES, TurbineError, translating
+from turbine_sdk.router_exceptions import (
     REQUEST_ID_HEADER,
     ROUTER_EXCEPTIONS,
     RouterError,
@@ -37,39 +37,39 @@ from comfy_sdk.router_exceptions import (
 )
 
 
-def _wf(client: Comfy | AsyncComfy):
+def _wf(client: Turbine | AsyncTurbine):
     return client.workflows.from_json({"3": {"class_type": "KSampler", "inputs": {}}})
 
 
-def _assert_no_leak(entry_point: str, fn: Callable[[], Any], expected: type[ComfyError]) -> None:
+def _assert_no_leak(entry_point: str, fn: Callable[[], Any], expected: type[TurbineError]) -> None:
     try:
         fn()
-    except ComfyError as exc:
+    except TurbineError as exc:
         assert isinstance(exc, expected), (
             f"{entry_point} raised {type(exc).__name__}, expected {expected.__name__}"
         )
     except LowApiError as exc:
         pytest.fail(
-            f"{entry_point} leaked comfy_low.errors.{type(exc).__name__} "
-            "instead of translating it to a comfy_sdk ComfyError"
+            f"{entry_point} leaked turbine_low.errors.{type(exc).__name__} "
+            "instead of translating it to a turbine_sdk TurbineError"
         )
     else:
         pytest.fail(f"{entry_point} did not raise; the scenario should force an error")
 
 
 async def _assert_no_leak_async(
-    entry_point: str, coro: Awaitable[Any], expected: type[ComfyError]
+    entry_point: str, coro: Awaitable[Any], expected: type[TurbineError]
 ) -> None:
     try:
         await coro
-    except ComfyError as exc:
+    except TurbineError as exc:
         assert isinstance(exc, expected), (
             f"{entry_point} raised {type(exc).__name__}, expected {expected.__name__}"
         )
     except LowApiError as exc:
         pytest.fail(
-            f"{entry_point} leaked comfy_low.errors.{type(exc).__name__} "
-            "instead of translating it to a comfy_sdk ComfyError"
+            f"{entry_point} leaked turbine_low.errors.{type(exc).__name__} "
+            "instead of translating it to a turbine_sdk TurbineError"
         )
     else:
         pytest.fail(f"{entry_point} did not raise; the scenario should force an error")
@@ -79,7 +79,7 @@ async def _assert_no_leak_async(
 
 
 def test_output_download_methods_translate_on_deleted_asset(server, tmp_path) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         out = job.get_outputs("13")[0]
         client.assets.delete(out.id)  # server now 404s this asset's content
@@ -91,7 +91,7 @@ def test_output_download_methods_translate_on_deleted_asset(server, tmp_path) ->
 
 
 async def test_async_output_download_methods_translate_on_deleted_asset(server, tmp_path) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.run(_wf(client))
         out = job.get_outputs("13")[0]
         await client.assets.delete(out.id)
@@ -110,13 +110,13 @@ async def test_async_output_download_methods_translate_on_deleted_asset(server, 
 
 
 def test_asset_factory_get_translates_on_deleted_asset(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.assets.delete("asset_out_01")
         _assert_no_leak("AssetFactory.get", lambda: client.assets.get("asset_out_01"), NotFound)
 
 
 async def test_async_asset_factory_get_translates_on_deleted_asset(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.assets.delete("asset_out_01")
         await _assert_no_leak_async(
             "AsyncAssetFactory.get", client.assets.get("asset_out_01"), NotFound
@@ -128,13 +128,13 @@ async def test_async_asset_factory_get_translates_on_deleted_asset(server) -> No
 
 def test_job_factory_get_translates_on_missing_job(server) -> None:
     server.state.job_not_found = True
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         _assert_no_leak("JobFactory.get", lambda: client.jobs.get("no_such_job"), NotFound)
 
 
 async def test_async_job_factory_get_translates_on_missing_job(server) -> None:
     server.state.job_not_found = True
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await _assert_no_leak_async("AsyncJobFactory.get", client.jobs.get("no_such_job"), NotFound)
 
 
@@ -142,14 +142,14 @@ async def test_async_job_factory_get_translates_on_missing_job(server) -> None:
 
 
 def test_job_events_translates_non_501_error(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         server.state.events_error = (403, "forbidden")
         _assert_no_leak("Job.events", lambda: list(job.events()), Forbidden)
 
 
 async def test_async_job_events_translates_non_501_error(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.run(_wf(client))
         server.state.events_error = (403, "forbidden")
 
@@ -180,7 +180,7 @@ _BASE_ATTRIBUTES = (
 
 @pytest.mark.parametrize("name", _BASE_ATTRIBUTES)
 def test_the_base_error_answers_to_its_whole_attribute_surface(name: str) -> None:
-    assert hasattr(ComfyError("boom"), name)
+    assert hasattr(TurbineError("boom"), name)
 
 
 @pytest.mark.parametrize("name", ("request_id", "idempotency_key", "retry_after"))
@@ -189,7 +189,7 @@ def test_those_attributes_default_to_none_rather_than_being_absent(name: str) ->
     # request id, both leave the attribute readable as `None`. A caller writes
     # `exc.idempotency_key` unconditionally; there is no surface on which that
     # is an AttributeError.
-    assert getattr(ComfyError("boom"), name) is None
+    assert getattr(TurbineError("boom"), name) is None
 
 
 @pytest.mark.parametrize("cls", ROUTER_EXCEPTIONS + (RouterError,), ids=lambda c: c.__name__)
@@ -255,18 +255,18 @@ def test_a_cancelled_call_is_stamped_and_still_cancelled() -> None:
 
 @pytest.mark.parametrize("name", _STAMPED_ATTRIBUTES)
 def test_a_stamped_transport_error_reads_every_attribute_as_none(name: str) -> None:
-    # httpx's classes declare none of these; the stamp defaults them so the
+    # httpx2's classes declare none of these; the stamp defaults them so the
     # documented surface is uniform on the no-response failures it matters most
     # on, rather than uniform everywhere except there.
-    with pytest.raises(httpx.ConnectError) as excinfo:
+    with pytest.raises(httpx2.ConnectError) as excinfo:
         with translating(idempotency_key="k-06"):
-            raise httpx.ConnectError("refused")
+            raise httpx2.ConnectError("refused")
     assert getattr(excinfo.value, name) is None
 
 
 def test_every_readable_base_attribute_is_defaulted_onto_a_stamped_error() -> None:
     # The pairing that keeps the two lists honest: an attribute added to
-    # `ComfyError` for a caller to read inside an `except` block has to be
+    # `TurbineError` for a caller to read inside an `except` block has to be
     # defaulted onto the exceptions this SDK does not build, or it is readable
     # on some errors and an AttributeError on others.
     readable = set(_BASE_ATTRIBUTES) - {"message", "code", "http_status", "details"}
@@ -275,7 +275,7 @@ def test_every_readable_base_attribute_is_defaulted_onto_a_stamped_error() -> No
 
 def test_the_stamp_never_overwrites_an_attribute_that_is_already_set() -> None:
     err = LowApiError("slow down", code="queue_full", http_status=429, retry_after=7)
-    with pytest.raises(ComfyError) as excinfo:
+    with pytest.raises(TurbineError) as excinfo:
         with translating(idempotency_key="k-07"):
             raise err
     assert excinfo.value.retry_after == 7
@@ -286,7 +286,7 @@ def test_the_stamp_never_overwrites_an_attribute_that_is_already_set() -> None:
     (
         ("req_abc123", "req_abc123"),
         ("  req_abc123  ", "req_abc123"),
-        # `httpx.Headers.get` joins duplicate headers with ", " — take the
+        # `httpx2.Headers.get` joins duplicate headers with ", " — take the
         # first id rather than splicing two into one that identifies no call.
         ("req_a, req_b", "req_a"),
         # A terminal escape truncates at the first character outside the class
@@ -316,15 +316,15 @@ def test_both_layers_clean_the_request_id_through_the_same_function() -> None:
     # display on one surface cannot be unsafe on the other.
     hostile = "req_ok[31m" + "x" * 500
     from_envelope = low_transport._request_id(
-        httpx.Response(500, headers={REQUEST_ID_HEADER: hostile})
+        httpx2.Response(500, headers={REQUEST_ID_HEADER: hostile})
     )
     from_router = error_from_response(500, {REQUEST_ID_HEADER: hostile}).request_id
     assert from_envelope == from_router == "req_ok"
 
 
 def test_the_two_layers_spell_the_request_id_header_the_same_way() -> None:
-    # `comfy_low` reads it off the shared error envelope and `comfy_sdk` reads
+    # `turbine_low` reads it off the shared error envelope and `turbine_sdk` reads
     # it off a router error response, so the name is written out in both — and
-    # neither may import the other's copy (comfy_low never imports comfy_sdk).
+    # neither may import the other's copy (turbine_low never imports turbine_sdk).
     # A drift here would silently drop the id on one of the two surfaces.
     assert low_transport.REQUEST_ID_HEADER == REQUEST_ID_HEADER

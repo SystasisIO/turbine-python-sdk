@@ -1,29 +1,8 @@
-"""Comfy SDK — the idiomatic Python client for the Comfy API v2.
+"""Turbine SDK: workflow execution and TurbineOS extensions.
 
-The thick, hand-written layer integrators import. It runs an API-format workflow
-against any Comfy API v2 surface (self-hosted proxy, Comfy Cloud, serverless) —
-the only per-surface difference is the ``COMFY_BASE_URL`` environment variable
-and an optional key — and owns
-everything a generator cannot produce: local blake3 dedup-upload, ``core/ASSET``
-substitution, idempotent submit, live SSE with a poll-authoritative backstop,
-range-aware downloads, and typed errors. It is layered over ``comfy_low`` (the
-generated protocol bindings + thin transport).
-
-Quickstart::
-
-    from comfy_sdk import Comfy
-
-    client = Comfy(api_key="comfyui-...")              # Comfy Cloud
-    # export COMFY_API_KEY=comfyui-...                 # ...or from the environment
-    # client = Comfy()                                 # explicit key wins over it
-    # export COMFY_BASE_URL=http://127.0.0.1:8189      # self-hosted, no key needed
-
-    wf = client.workflows.from_file("workflow_api.json")
-    asset = client.assets.from_file("photo.png")       # lazy; uploaded on use
-    wf.set_input("10", "image", asset)
-
-    result = client.run(wf)                            # submit + poll-to-done
-    result.get_outputs("13")[0].to_file("out.png")
+Create ``Turbine(base_url="https://your-deployment.example", api_key="...")``
+or use ``TURBINE_BASE_URL`` and ``TURBINE_API_KEY``. Router is opt-in through
+``router_base_url``. Both sync and async clients support caller-owned HTTPX2 pools.
 """
 
 from __future__ import annotations
@@ -35,11 +14,8 @@ from .assets import Asset, AssetFactory, AsyncAsset, AsyncAssetFactory
 from .client import (
     API_KEY_ENV_VAR,
     BASE_URL_ENV_VAR,
-    COMFY_CLOUD_BASE_URL,
-    COMFY_ROUTER_BASE_URL,
-    ROUTER_BASE_URL_ENV_VAR,
-    AsyncComfy,
-    Comfy,
+    AsyncTurbine,
+    Turbine,
 )
 from .events import (
     Event,
@@ -53,7 +29,6 @@ from .exceptions import (
     AlreadyCompleted,
     BlobNotFound,
     CancelRefused,
-    ComfyError,
     Forbidden,
     HashMismatch,
     IdempotencyKeyReuse,
@@ -65,6 +40,7 @@ from .exceptions import (
     NotFound,
     QueueFull,
     RouterError,
+    TurbineError,
     Unauthorized,
     WorkflowFormatUi,
 )
@@ -76,10 +52,8 @@ from .retry import DEFAULT_RETRY, NO_RETRY, RetryPolicy
 from .workflows import Workflow, WorkflowFactory
 
 try:
-    # Single source of truth is the installed distribution metadata, which
-    # publish.yml stamps from the release tag. Hardcoding it here would pin
-    # __version__ to the pyproject placeholder on every published release.
-    __version__ = _pkg_version("comfy-sdk")
+    # Report the installed distribution version, including release build metadata.
+    __version__ = _pkg_version("turbine-sdk")
 except PackageNotFoundError:  # running from a source tree, not installed
     __version__ = "0+unknown"
 
@@ -88,13 +62,10 @@ from .models import RouterRunResult
 
 __all__ = [
     # clients
-    "Comfy",
-    "COMFY_CLOUD_BASE_URL",
+    "Turbine",
     "BASE_URL_ENV_VAR",
-    "COMFY_ROUTER_BASE_URL",
-    "ROUTER_BASE_URL_ENV_VAR",
     "API_KEY_ENV_VAR",
-    "AsyncComfy",
+    "AsyncTurbine",
     # model runs
     "RouterRunResult",
     # model discovery
@@ -131,7 +102,7 @@ __all__ = [
     "StatusChange",
     "Log",
     # exceptions
-    "ComfyError",
+    "TurbineError",
     "JobFailed",
     "QueueFull",
     "MissingAsset",
@@ -147,7 +118,7 @@ __all__ = [
     "Forbidden",
     # Comfy Router failures. `RouterError` is the base of every one of them and
     # is lifted here because it is the broad catch a caller writes first; the
-    # per-bucket classes stay in `comfy_sdk.router_exceptions`, which is one
+    # per-bucket classes stay in `turbine_sdk.router_exceptions`, which is one
     # import path for the whole closed set rather than half of it here and half
     # of it there. `AlreadyCompleted` / `CancelRefused` are the cancel route's
     # refusals, which that closed set does not name.

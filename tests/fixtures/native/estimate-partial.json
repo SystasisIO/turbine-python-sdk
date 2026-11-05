@@ -1,0 +1,7 @@
+{
+  "total": null,
+  "nodes": [
+    {"node_id": "1", "model_id": null, "price": {"amount": "125", "precision": 4, "unit": "USD"}}
+  ],
+  "breakdown_complete": false
+}

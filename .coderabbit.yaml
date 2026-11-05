@@ -39,7 +39,7 @@ reviews:
 
         Only comment on issues introduced by this PR's changes; do not flag
         pre-existing problems in moved, re-indented, or reformatted code.
-    - path: "src/comfy_sdk/**"
+    - path: "src/turbine_sdk/**"
       instructions: |
         Public SDK surface. Focus on:
         - Backward compatibility of public classes/functions (this is a

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# Regenerate the comfy_low pydantic v2 models from the vendored spec.
+# Regenerate the turbine_low pydantic v2 models from the vendored spec.
 # The generated file is committed; CI runs this and fails if the tree drifts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/src/comfy_low/models/_generated.py"
+OUT="$ROOT/src/turbine_low/models/_generated.py"
 
 datamodel-codegen \
   --input "$ROOT/spec/openapi.yaml" \
   --input-file-type openapi \
   --output "$OUT" \
   --output-model-type pydantic_v2.BaseModel \
-  --target-python-version 3.10 \
+  --target-python-version 3.11 \
   --use-standard-collections \
   --use-union-operator \
   --use-schema-description \

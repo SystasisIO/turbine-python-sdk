@@ -1,7 +1,8 @@
 """Content-addressed asset handles and their constructors.
 
-``client.assets.from_*`` returns a **lazy** :class:`Asset` handle: no network at
-construction. On first use (``commit``/``as_reference``/submit) the handle hashes
+``from_file``, ``from_bytes`` and ``from_stream`` return lazy asset handles.
+``from_url`` downloads the source immediately through the configured HTTPX2 pool;
+upload remains lazy. On first use (``commit``/``as_reference``/submit) a handle hashes
 its bytes locally with blake3, probes the server's dedup fast-path
 (``HEAD by-hash`` then ``from-hash`` mint over existing bytes), and only streams a
 full ``multipart`` upload when the server does not already have the bytes. Because
@@ -20,10 +21,10 @@ from os import PathLike
 from os.path import basename, getsize
 from typing import BinaryIO
 
-import httpx
+import httpx2
 
-from comfy_low.models import Asset as LowAsset
-from comfy_low.transport import AsyncComfyLow, ComfyLow
+from turbine_low.models import Asset as LowAsset
+from turbine_low.transport import AsyncTurbineLow, TurbineLow
 
 from . import _core, _hashing
 from .exceptions import translating
@@ -54,7 +55,7 @@ def _guess_content_type(name: str | None) -> str:
 
 
 class _AssetBase:
-    _is_comfy_asset = True
+    _is_turbine_asset = True
 
     def __init__(self, source: _Source) -> None:
         self._content_type = source.content_type
@@ -117,7 +118,7 @@ class _AssetBase:
 class Asset(_AssetBase):
     """A lazy asset handle bound to the synchronous client."""
 
-    def __init__(self, low: ComfyLow, source: _Source) -> None:
+    def __init__(self, low: TurbineLow, source: _Source) -> None:
         super().__init__(source)
         self._low = low
 
@@ -191,7 +192,7 @@ class Asset(_AssetBase):
 class AsyncAsset(_AssetBase):
     """A lazy asset handle bound to the asynchronous client."""
 
-    def __init__(self, low: AsyncComfyLow, source: _Source) -> None:
+    def __init__(self, low: AsyncTurbineLow, source: _Source) -> None:
         super().__init__(source)
         self._low = low
 
@@ -269,7 +270,7 @@ def _bytes_source(data: bytes, filename: str | None, content_type: str | None) -
 class AssetFactory:
     """``client.assets`` — sync alternative constructors for :class:`Asset`."""
 
-    def __init__(self, low: ComfyLow) -> None:
+    def __init__(self, low: TurbineLow) -> None:
         self._low = low
 
     def from_file(self, path: str | PathLike[str]) -> Asset:
@@ -299,9 +300,9 @@ class AssetFactory:
     def from_url(self, url: str) -> Asset:
         # Client-side download (not a server-side fetch): the bytes must transit
         # the same blake3 -> dedup -> upload pipeline as every other source.
-        resp = httpx.get(url, follow_redirects=True)
+        resp = self._low.get_external_content(url)
         resp.raise_for_status()
-        filename = basename(httpx.URL(url).path) or "download.bin"
+        filename = basename(httpx2.URL(url).path) or "download.bin"
         ct = resp.headers.get("Content-Type", "").split(";")[0] or None
         return Asset(self._low, _bytes_source(resp.content, filename, ct))
 
@@ -322,7 +323,7 @@ class AssetFactory:
 class AsyncAssetFactory:
     """``client.assets`` — async alternative constructors for :class:`AsyncAsset`."""
 
-    def __init__(self, low: AsyncComfyLow) -> None:
+    def __init__(self, low: AsyncTurbineLow) -> None:
         self._low = low
 
     def from_file(self, path: str | PathLike[str]) -> AsyncAsset:
@@ -348,11 +349,10 @@ class AsyncAssetFactory:
         return AsyncAsset(self._low, _bytes_source(data, filename, content_type))
 
     async def from_url(self, url: str) -> AsyncAsset:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            content = resp.content
-        filename = basename(httpx.URL(url).path) or "download.bin"
+        resp = await self._low.get_external_content(url)
+        resp.raise_for_status()
+        content = resp.content
+        filename = basename(httpx2.URL(url).path) or "download.bin"
         ct = resp.headers.get("Content-Type", "").split(";")[0] or None
         return AsyncAsset(self._low, _bytes_source(content, filename, ct))
 

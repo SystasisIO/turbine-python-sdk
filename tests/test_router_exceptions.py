@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from comfy_sdk.exceptions import ComfyError
-from comfy_sdk.router_exceptions import (
+from turbine_sdk.exceptions import TurbineError
+from turbine_sdk.router_exceptions import (
     ERROR_TYPE_HEADER,
     REQUEST_ID_HEADER,
     ROUTER_ERROR_TYPES,
@@ -139,7 +139,7 @@ def test_every_class_is_catchable_as_the_router_base(
 
 def test_the_router_base_is_a_comfy_error() -> None:
     # A caller who wants everything the SDK can raise keeps one except clause.
-    assert issubclass(RouterError, ComfyError)
+    assert issubclass(RouterError, TurbineError)
 
 
 def test_the_closed_set_is_exactly_the_declared_error_types() -> None:
@@ -196,7 +196,7 @@ def test_the_request_id_is_attached_to_every_exception(
 
 
 def test_the_request_id_header_is_matched_case_insensitively() -> None:
-    # Header names are case-insensitive on the wire, and an httpx.Headers is not
+    # Header names are case-insensitive on the wire, and an httpx2.Headers is not
     # the only mapping this is handed.
     exc = error_from_response(
         403,
@@ -497,7 +497,7 @@ def test_the_shared_names_are_the_workflow_surface_classes() -> None:
     # `tests/test_exception_modules.py` is the general form of this -- it
     # enumerates both modules rather than naming three classes. This stays
     # because these three are the ones that actually collided.
-    from comfy_sdk import exceptions as workflow_exceptions
+    from turbine_sdk import exceptions as workflow_exceptions
 
     for router_cls, workflow_cls in (
         (Unauthorized, workflow_exceptions.Unauthorized),
@@ -528,7 +528,7 @@ def test_retry_after_is_preserved_on_a_deadline_exceeded_504() -> None:
     # The bucket whose contract tells the caller to retry with the SAME key and
     # whose Retry-After says when. The default policy makes that retry, so the
     # header being dropped here would silently disable it.
-    from comfy_sdk.retry import RetryPolicy
+    from turbine_sdk.retry import RetryPolicy
 
     status, headers, body = stub_error_response("deadline_exceeded", 504)
     exc = error_from_response(status, {**headers, "Retry-After": "5"}, body)
@@ -565,7 +565,7 @@ def test_no_retry_after_header_is_none() -> None:
 def test_the_default_policy_retries_a_throttled_bucket_that_named_a_pace() -> None:
     # The end-to-end property the parse exists for. Without the header the 429
     # is not asking to be asked again, so the same policy declines it.
-    from comfy_sdk.retry import RetryPolicy
+    from turbine_sdk.retry import RetryPolicy
 
     policy = RetryPolicy()
     paced = error_from_response(429, {ERROR_TYPE_HEADER: "rate_limited", "Retry-After": "7"}, None)
@@ -578,8 +578,8 @@ def test_the_default_policy_retries_a_throttled_bucket_that_named_a_pace() -> No
 
 def test_the_location_rendering_is_shared_with_the_summariser() -> None:
     """`.location` and the summary must never disagree about a field's name."""
-    from comfy_low.errors import summarise_detail
-    from comfy_sdk.router_exceptions import _detail_from
+    from turbine_low.errors import summarise_detail
+    from turbine_sdk.router_exceptions import _detail_from
 
     # A non-scalar `loc` member is dropped by both, so neither renders a repr.
     entry = {"loc": ["body", ["a", "b"], 0], "msg": "bad"}
@@ -601,7 +601,7 @@ def _assert_bounded_and_printable(text: str) -> None:
     """``text`` is one printable line no longer than the excerpt limit."""
     import unicodedata
 
-    from comfy_low.errors import _BODY_EXCERPT_LIMIT
+    from turbine_low.errors import _BODY_EXCERPT_LIMIT
 
     assert "\n" not in text
     assert "\x1b" not in text
@@ -629,7 +629,7 @@ def _assert_bounded_and_printable(text: str) -> None:
     ],
 )
 def test_a_hostile_string_detail_is_bounded_and_printable(build: Any) -> None:
-    from comfy_low.errors import _BODY_EXCERPT_LIMIT
+    from turbine_low.errors import _BODY_EXCERPT_LIMIT
 
     exc = build(HOSTILE)
 

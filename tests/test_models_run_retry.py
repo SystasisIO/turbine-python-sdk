@@ -29,7 +29,7 @@ narrower carry the router describes for its own deadline), so a retry design the
 real server would reject cannot pass here. The never-delivered class is asserted
 against ``_FlakyLow`` instead: a stub HTTP server that is up cannot refuse a
 connection. The schedule and deadline arithmetic is asserted directly against
-:class:`~comfy_sdk.retry.RetryPolicy` and :class:`~comfy_sdk.retry.Retrier`,
+:class:`~turbine_sdk.retry.RetryPolicy` and :class:`~turbine_sdk.retry.Retrier`,
 where a fake clock makes it exact instead of timing-dependent.
 """
 
@@ -39,22 +39,22 @@ import time
 from collections.abc import Mapping
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 
-from comfy_low.errors import ApiError
-from comfy_low.transport import MODEL_RUN_TIMEOUT
-from comfy_sdk import DEFAULT_RETRY, NO_RETRY, AsyncComfy, Comfy, RetryPolicy
-from comfy_sdk.exceptions import ComfyError, IdempotencyKeyReuse
-from comfy_sdk.models import AsyncModels, Models
-from comfy_sdk.retry import (
+from turbine_low.errors import ApiError
+from turbine_low.transport import MODEL_RUN_TIMEOUT
+from turbine_sdk import DEFAULT_RETRY, NO_RETRY, AsyncTurbine, RetryPolicy, Turbine
+from turbine_sdk.exceptions import IdempotencyKeyReuse, TurbineError
+from turbine_sdk.models import AsyncModels, Models
+from turbine_sdk.retry import (
     Retrier,
     error_bucket_of,
     is_collectable,
     is_unknown_outcome_status,
     retry_after_of,
 )
-from comfy_sdk.router_exceptions import (
+from turbine_sdk.router_exceptions import (
     ContentPolicyViolation,
     DeadlineExceeded,
     InternalError,
@@ -104,7 +104,7 @@ class _FlakyLow:
         self.payloads.append(dict(arguments))
         if self.fail_times > 0:
             self.fail_times -= 1
-            raise httpx.ConnectError("connection refused")
+            raise httpx2.ConnectError("connection refused")
         # `post_model_run` answers (body, headers) — see its docstring for why
         # the headers are part of the contract on this route rather than
         # incidental. The stub carries none; the tests here are about the retry
@@ -203,7 +203,7 @@ def test_a_second_call_is_a_new_key_even_though_both_retried() -> None:
 
 
 async def test_a_second_async_call_is_a_new_key(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.models.run(MODEL, ARGS)
         await client.models.run(MODEL, ARGS)
     first, second = server.state.model_run_idempotency_keys
@@ -246,7 +246,7 @@ def test_retry_is_on_by_default(server) -> None:
     server.state.model_run_fail_times = 1
     server.state.model_run_transient_error = (429, "concurrency_limit_exceeded")
     server.state.model_run_retry_after = "0"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 2
     assert len(set(server.state.model_run_idempotency_keys)) == 1
@@ -265,8 +265,8 @@ def test_retry_can_be_disabled(server) -> None:
     server.state.model_run_fail_times = 1
     server.state.model_run_transient_error = (429, "concurrency_limit_exceeded")
     server.state.model_run_retry_after = "0"
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
@@ -275,16 +275,16 @@ async def test_retry_can_be_disabled_on_the_async_client(server) -> None:
     server.state.model_run_fail_times = 1
     server.state.model_run_transient_error = (429, "concurrency_limit_exceeded")
     server.state.model_run_retry_after = "0"
-    async with AsyncComfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError):
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             await client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
 
 def test_the_policy_is_readable_off_the_namespace(server) -> None:
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         assert client.models.retry is NO_RETRY
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert client.models.retry is DEFAULT_RETRY
 
 
@@ -304,8 +304,8 @@ def test_a_deterministic_refusal_is_never_retried(server, status: int, code: str
     # Asking again cannot change any of these answers, and on a billed surface
     # a retry of a refusal spends money to be refused again.
     server.state.model_run_error = (status, code)
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
@@ -315,8 +315,8 @@ def test_a_429_without_a_pace_is_not_retried(server) -> None:
     # not asking to be asked again, and guessing a delay for it is the
     # thundering-herd case full jitter exists to avoid.
     server.state.model_run_error = (429, "queue_full")
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
@@ -328,7 +328,7 @@ def test_a_429_that_names_a_pace_is_retried_at_that_pace(server) -> None:
     server.state.model_run_fail_times = 2
     server.state.model_run_transient_error = (429, "queue_full")
     server.state.model_run_retry_after = "0"
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 3
     assert len(set(server.state.model_run_idempotency_keys)) == 1
@@ -338,7 +338,7 @@ def test_the_server_named_pace_is_used_instead_of_the_backoff_schedule() -> None
     clock = _FakeClock()
     policy = RetryPolicy(max_elapsed=60.0, initial_backoff=1.0, max_backoff=2.0, jitter=False)
     retrier = Retrier(policy, now=clock, rng=lambda: 1.0)
-    paced = ComfyError("slow down", code="queue_full", http_status=429)
+    paced = TurbineError("slow down", code="queue_full", http_status=429)
     paced.retry_after = 7  # type: ignore[attr-defined]
     # 7s is well above `max_backoff`: a pace the server named is honoured as
     # given rather than capped by a ceiling meant for our own guesswork.
@@ -347,8 +347,8 @@ def test_the_server_named_pace_is_used_instead_of_the_backoff_schedule() -> None
 
 async def test_a_deterministic_refusal_is_never_retried_on_the_async_client(server) -> None:
     server.state.model_run_error = (422, "invalid_workflow")
-    async with AsyncComfy(retry=FAST) as client:
-        with pytest.raises(ComfyError):
+    async with AsyncTurbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             await client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
@@ -361,8 +361,8 @@ def test_a_5xx_is_not_retried_against_a_reject_on_duplicate_server(server, statu
     # 422 on a v2-rule deployment), replacing the real error with a confusing
     # one. So the default policy does not make it, and the caller sees the 5xx.
     server.state.model_run_error = (status, "internal_error")
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
     assert excinfo.value.http_status == status
@@ -374,7 +374,7 @@ def test_a_5xx_is_retried_under_the_replay_opt_in(server, status: int) -> None:
     server.state.model_run_replays_idempotency_key = True
     server.state.model_run_transient_error = (status, "internal_error")
     server.state.model_run_fail_times = 1
-    with Comfy(retry=FAST_OPTED_IN) as client:
+    with Turbine(retry=FAST_OPTED_IN, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 2
     assert len(set(server.state.model_run_idempotency_keys)) == 1
@@ -386,8 +386,8 @@ def test_a_permanent_5xx_eventually_surfaces_as_the_sdk_error(server) -> None:
     policy = RetryPolicy(
         max_elapsed=0.2, initial_backoff=0.01, max_backoff=0.02, retry_possibly_in_flight=True
     )
-    with Comfy(retry=policy) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.http_status == 500
     # It gave up rather than looping forever, and it did try more than once.
@@ -403,16 +403,16 @@ def test_a_client_timeout_is_not_retried_by_default(server) -> None:
     # timeout means "no answer yet", not "it did not happen". The server may
     # still be generating, so the default policy does not start a second one.
     server.state.model_run_delay = 1.0
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(httpx.TimeoutException):
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(httpx2.TimeoutException):
             client.models.run(MODEL, ARGS, timeout=0.15)
     assert server.state.model_run_count == 1
 
 
 async def test_an_async_client_timeout_is_not_retried_by_default(server) -> None:
     server.state.model_run_delay = 1.0
-    async with AsyncComfy(retry=FAST) as client:
-        with pytest.raises(httpx.TimeoutException):
+    async with AsyncTurbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(httpx2.TimeoutException):
             await client.models.run(MODEL, ARGS, timeout=0.15)
     assert server.state.model_run_count == 1
 
@@ -428,8 +428,8 @@ def test_opting_in_retries_a_client_timeout_under_the_one_key(server) -> None:
         max_backoff=0.02,
         retry_possibly_in_flight=True,
     )
-    with Comfy(retry=policy) as client:
-        with pytest.raises(httpx.TimeoutException):
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
+        with pytest.raises(httpx2.TimeoutException):
             client.models.run(MODEL, ARGS, timeout=0.15)
     assert server.state.model_run_count >= 2
     assert len(set(server.state.model_run_idempotency_keys)) == 1
@@ -442,7 +442,7 @@ def test_the_retry_deadline_never_interrupts_an_attempt(server) -> None:
     # leave a generation running with nobody waiting for it.
     server.state.model_run_delay = 0.4
     policy = RetryPolicy(max_elapsed=0.05, initial_backoff=0.01, max_backoff=0.02)
-    with Comfy(retry=policy) as client:
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 1
 
@@ -460,8 +460,8 @@ def test_retries_stop_at_the_elapsed_budget_not_at_an_attempt_count(server) -> N
         max_elapsed=0.3, initial_backoff=0.01, max_backoff=0.02, retry_possibly_in_flight=True
     )
     started = time.monotonic()
-    with Comfy(retry=policy) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
     elapsed = time.monotonic() - started
     # Generous upper bound: what matters is that it is bounded by the budget
@@ -659,7 +659,7 @@ def test_everything_below_500_has_a_known_outcome(status: int) -> None:
     ids=lambda v: str(v),
 )
 def test_a_named_pace_is_read_off_the_error_or_treated_as_absent(raw, expected) -> None:
-    exc = ComfyError("throttled", code="queue_full", http_status=429)
+    exc = TurbineError("throttled", code="queue_full", http_status=429)
     exc.retry_after = raw  # type: ignore[attr-defined]
     assert retry_after_of(exc) == expected
 
@@ -682,7 +682,7 @@ def test_service_unavailable_is_not_retried_by_default() -> None:
     # the SDK does not make that retry for them. It arrives on a 503, and the
     # question the default policy answers first is whether the one
     # Idempotency-Key is still spendable -- which no contract says a 503 leaves
-    # it. See comfy_sdk.retry's module docstring.
+    # it. See turbine_sdk.retry's module docstring.
     exc = ServiceUnavailable("a dependency is briefly unavailable", http_status=503)
     assert not DEFAULT_RETRY.should_retry(exc)
     assert not FAST.should_retry(exc)
@@ -714,7 +714,7 @@ def test_service_unavailable_is_retried_under_the_replay_opt_in_on_one_key() -> 
 
 
 def test_a_router_error_reaches_the_retry_loop_at_all() -> None:
-    # Router errors derive from ComfyError, not ApiError, so a `run` that only
+    # Router errors derive from TurbineError, not ApiError, so a `run` that only
     # caught ApiError would never hand one to the policy — making the branch
     # above unreachable and retry a silent no-op the day this route raises
     # them.
@@ -740,9 +740,9 @@ def test_a_router_error_reaches_the_retry_loop_at_all() -> None:
 @pytest.mark.parametrize(
     "exc",
     [
-        httpx.ConnectError("refused"),
-        httpx.ConnectTimeout("too slow to connect"),
-        httpx.PoolTimeout("no connection free"),
+        httpx2.ConnectError("refused"),
+        httpx2.ConnectTimeout("too slow to connect"),
+        httpx2.PoolTimeout("no connection free"),
     ],
     ids=lambda e: type(e).__name__,
 )
@@ -755,10 +755,10 @@ def test_a_connect_phase_failure_is_retryable(exc: Exception) -> None:
 @pytest.mark.parametrize(
     "exc",
     [
-        httpx.ReadTimeout("no answer"),
-        httpx.ReadError("connection dropped"),
-        httpx.WriteError("connection dropped"),
-        httpx.RemoteProtocolError("truncated"),
+        httpx2.ReadTimeout("no answer"),
+        httpx2.ReadError("connection dropped"),
+        httpx2.WriteError("connection dropped"),
+        httpx2.RemoteProtocolError("truncated"),
     ],
     ids=lambda e: type(e).__name__,
 )
@@ -771,8 +771,8 @@ def test_a_possibly_in_flight_failure_needs_the_opt_in(exc: Exception) -> None:
 @pytest.mark.parametrize(
     "exc",
     [
-        httpx.LocalProtocolError("the client built a bad request"),
-        httpx.UnsupportedProtocol("no such scheme"),
+        httpx2.LocalProtocolError("the client built a bad request"),
+        httpx2.UnsupportedProtocol("no such scheme"),
         ValueError("not a transport failure at all"),
     ],
     ids=lambda e: type(e).__name__,
@@ -800,7 +800,7 @@ def test_a_deadline_504_that_names_a_pace_is_collected_under_the_one_key(server)
     server.state.model_run_transient_error = (504, "deadline_exceeded")
     server.state.model_run_retry_after = "0"
     server.state.model_run_fail_times = 1
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 2
     # Spelled out rather than `len(set(...)) == 1`, which is also true of
@@ -817,7 +817,7 @@ async def test_a_deadline_504_is_collected_on_the_async_client(server) -> None:
     server.state.model_run_transient_error = (504, "deadline_exceeded")
     server.state.model_run_retry_after = "0"
     server.state.model_run_fail_times = 1
-    async with AsyncComfy(retry=FAST) as client:
+    async with AsyncTurbine(retry=FAST, router_base_url=server.base_url) as client:
         assert await client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 2
     first, second = server.state.model_run_idempotency_keys
@@ -831,8 +831,8 @@ def test_a_deadline_504_without_a_pace_is_not_retried(server) -> None:
     # so the resend would be dispatching new work -- back to the unknown-outcome
     # class, where the caller sees the 504.
     server.state.model_run_error = (504, "deadline_exceeded")
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
     assert excinfo.value.http_status == 504
@@ -845,8 +845,8 @@ def test_a_504_that_is_not_the_deadline_bucket_is_not_collected(server) -> None:
     # helpfully the response is paced.
     server.state.model_run_error = (504, "provider_timeout")
     server.state.model_run_retry_after = "0"
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
     assert excinfo.value.http_status == 504
@@ -859,7 +859,7 @@ def test_an_in_progress_409_that_names_a_pace_is_waited_out_and_retried(server) 
     server.state.model_run_transient_error = (409, "concurrency_limit_exceeded")
     server.state.model_run_retry_after = "0"
     server.state.model_run_fail_times = 2
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 3
     keys = server.state.model_run_idempotency_keys
@@ -871,8 +871,8 @@ def test_a_409_that_names_no_pace_is_still_a_refusal(server) -> None:
     # Unchanged: an ordinary conflict is deterministic. The pace is the whole
     # signal that this one is "not yet" rather than "no".
     server.state.model_run_error = (409, "concurrency_limit_exceeded")
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
@@ -881,8 +881,8 @@ def test_no_retry_disables_the_collect_loop(server) -> None:
     server.state.model_run_collects_after_deadline = True
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_retry_after = "0"
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
@@ -896,8 +896,8 @@ def test_the_collect_loop_can_be_switched_off_in_the_policy(server) -> None:
     policy = RetryPolicy(
         max_elapsed=5.0, initial_backoff=0.01, max_backoff=0.02, retry_collectable=False
     )
-    with Comfy(retry=policy) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
 
@@ -914,8 +914,8 @@ def test_the_collect_loop_gives_up_at_the_elapsed_budget(server) -> None:
         max_elapsed=0.4, collect_max_elapsed=0.4, initial_backoff=0.01, max_backoff=0.02
     )
     started = time.monotonic()
-    with Comfy(retry=policy) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert time.monotonic() - started < 5.0
     assert excinfo.value.http_status == 504
@@ -959,7 +959,7 @@ def test_the_collect_budget_applies_only_to_the_collect_class() -> None:
     # collect loop's room is not a policy-wide regression for the fast classes.
     policy = RetryPolicy(max_elapsed=10.0, collect_max_elapsed=100.0, jitter=False)
     collectable = DeadlineExceeded("still generating", http_status=504, retry_after=5)
-    refused = httpx.ConnectError("refused")
+    refused = httpx2.ConnectError("refused")
 
     clock = _FakeClock()
     retrier = Retrier(policy, now=clock, rng=lambda: 1.0)
@@ -1004,7 +1004,7 @@ def test_a_deadline_504_at_the_server_bound_still_gets_a_collect_attempt() -> No
         (RouterError("conflict", http_status=409), False),
         (ServiceUnavailable("later", http_status=503, retry_after=3), False),
         (InternalError("boom", http_status=500, retry_after=3), False),
-        (httpx.ConnectError("refused"), False),
+        (httpx2.ConnectError("refused"), False),
     ],
     ids=lambda v: str(v),
 )
@@ -1025,7 +1025,7 @@ def test_the_bucket_is_read_from_either_layers_name_for_it() -> None:
         "deadline_exceeded"
     )
     assert error_bucket_of(ApiError("boom", http_status=500)) == "error"
-    assert error_bucket_of(httpx.ConnectError("refused")) is None
+    assert error_bucket_of(httpx2.ConnectError("refused")) is None
 
 
 def test_a_deadline_504_raised_as_a_protocol_error_is_still_collected() -> None:
@@ -1093,8 +1093,8 @@ def test_a_paced_hash_mismatch_409_is_still_a_refusal(server) -> None:
     # each resend is a fresh billed dispatch rather than a collection.
     server.state.model_run_error = (409, "hash_mismatch")
     server.state.model_run_retry_after = "0"
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
     assert excinfo.value.http_status == 409
@@ -1115,7 +1115,7 @@ def test_a_deadline_504_in_routers_own_error_shape_is_still_collected(server) ->
     server.state.model_run_transient_error = (504, "deadline_exceeded")
     server.state.model_run_retry_after = "0"
     server.state.model_run_fail_times = 1
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 2
     first, second = server.state.model_run_idempotency_keys
@@ -1129,8 +1129,8 @@ def test_the_bucket_gate_holds_in_routers_own_error_shape_too(server) -> None:
     server.state.model_run_router_error_shape = True
     server.state.model_run_error = (504, "provider_timeout")
     server.state.model_run_retry_after = "0"
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
     assert excinfo.value.http_status == 504
@@ -1142,8 +1142,8 @@ def test_a_router_error_body_keeps_its_detail_as_the_message(server) -> None:
     # diagnosable one.
     server.state.model_run_router_error_shape = True
     server.state.model_run_error = (500, "internal_error")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert "internal_error" in str(excinfo.value)
 
@@ -1154,7 +1154,7 @@ def test_a_router_error_body_keeps_its_detail_as_the_message(server) -> None:
 def test_the_default_collect_loop_against_a_non_collecting_deployment(server) -> None:
     # The cost of defaulting this on, asserted rather than assumed. The collect
     # rule is `spec/router-openapi.yaml`'s, so it binds Comfy Router -- but
-    # `COMFY_ROUTER_BASE_URL` can name a deployment that applies the v2 rule
+    # `router_base_url` can name a deployment that applies the v2 rule
     # instead: key stays claimed across an unknown-outcome 5xx, and the resend
     # is rejected `422 idempotency_key_reuse`. What the caller sees is still the
     # real 504: the refusal is an artefact of the collect loop, not an answer
@@ -1166,8 +1166,8 @@ def test_the_default_collect_loop_against_a_non_collecting_deployment(server) ->
     server.state.model_run_v2_key_rule = True
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_retry_after = "0"
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 2
     assert excinfo.value.http_status == 504
@@ -1182,8 +1182,8 @@ def test_the_default_collect_loop_against_a_non_collecting_deployment(server) ->
     policy = RetryPolicy(
         max_elapsed=5.0, initial_backoff=0.01, max_backoff=0.02, retry_collectable=False
     )
-    with Comfy(retry=policy) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
     assert excinfo.value.http_status == 504
@@ -1195,13 +1195,13 @@ def test_the_default_collect_loop_against_a_non_collecting_deployment(server) ->
 async def test_the_refused_collect_resend_is_chained_on_the_async_client(server) -> None:
     # The async loop makes the same substitution as the sync one. The two loops
     # are kept structurally identical, and only a test driven through
-    # `AsyncComfy` proves the second copy was edited too.
+    # `AsyncTurbine` proves the second copy was edited too.
     server.state.model_run_collects_after_deadline = False
     server.state.model_run_v2_key_rule = True
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_retry_after = "0"
-    async with AsyncComfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 2
     assert excinfo.value.http_status == 504
@@ -1215,8 +1215,8 @@ def test_the_opt_in_path_also_raises_the_5xx_that_caused_the_retry(server) -> No
     # error the caller has to act on; the 422 only says the resend was pointless.
     server.state.model_run_v2_key_rule = True
     server.state.model_run_error = (500, "internal_error")
-    with Comfy(retry=FAST_OPTED_IN) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST_OPTED_IN, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 2
     assert excinfo.value.http_status == 500
@@ -1236,8 +1236,8 @@ def test_only_a_key_refusal_substitutes_and_every_other_last_failure_wins(server
     server.state.model_run_transient_error = (500, "internal_error")
     server.state.model_run_fail_times = 1
     server.state.model_run_error = (404, "model_not_found")
-    with Comfy(retry=FAST_OPTED_IN) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST_OPTED_IN, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 2
     assert excinfo.value.http_status == 404
@@ -1251,7 +1251,7 @@ def test_a_first_attempt_key_refusal_is_still_raised_as_itself(server) -> None:
     # and `except IdempotencyKeyReuse` still catches this one.
     server.state.model_run_v2_key_rule = True
     server.state.model_run_idempotency["already-consumed-key-1"] = "done"
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         with pytest.raises(IdempotencyKeyReuse) as excinfo:
             client.models.run(MODEL, ARGS, idempotency_key="already-consumed-key-1")
     assert server.state.model_run_count == 1
@@ -1274,7 +1274,7 @@ def test_the_most_recent_claim_capable_failure_is_the_one_kept() -> None:
             raise ApiError("no", code="idempotency_key_reuse", http_status=422)
 
     low = _ThenRefusedLow()
-    with pytest.raises(ComfyError) as excinfo:
+    with pytest.raises(TurbineError) as excinfo:
         _models(low, FAST_OPTED_IN).run(MODEL, ARGS)
     assert len(low.keys) == 3
     assert excinfo.value.http_status == 503
@@ -1286,8 +1286,8 @@ def test_a_claim_capable_transport_failure_surfaces_as_httpx_not_a_comfy_error()
     # The retained failure is not always an `ApiError`. A `ReadTimeout` is
     # possibly-in-flight, so under the opt-in it CAN be the one kept -- and
     # `_as_sdk_error` only stamps a non-`ApiError`, it does not translate one.
-    # What the caller catches is therefore the raw `httpx` failure with the key
-    # on it, NOT an `IdempotencyKeyReuse`: an `except ComfyError` handler does
+    # What the caller catches is therefore the raw `httpx2` failure with the key
+    # on it, NOT an `IdempotencyKeyReuse`: an `except TurbineError` handler does
     # not fire for this case, which is why the docstring tells callers to catch
     # both. The 422 still rides along on `__cause__`.
 
@@ -1295,11 +1295,11 @@ def test_a_claim_capable_transport_failure_surfaces_as_httpx_not_a_comfy_error()
         def _attempt(self, arguments: Mapping[str, Any], key: str | None) -> dict[str, Any]:
             self.keys.append(key)
             if len(self.keys) == 1:
-                raise httpx.ReadTimeout("timed out")
+                raise httpx2.ReadTimeout("timed out")
             raise ApiError("no", code="idempotency_key_reuse", http_status=422)
 
     low = _TimeoutThenRefusedLow()
-    with pytest.raises(httpx.ReadTimeout) as excinfo:
+    with pytest.raises(httpx2.ReadTimeout) as excinfo:
         _models(low, FAST_OPTED_IN).run(MODEL, ARGS)
     assert len(low.keys) == 2
     assert len(set(low.keys)) == 1
@@ -1320,7 +1320,7 @@ def test_a_never_delivered_failure_does_not_suppress_a_genuine_key_refusal() -> 
         def _attempt(self, arguments: Mapping[str, Any], key: str | None) -> dict[str, Any]:
             self.keys.append(key)
             if len(self.keys) == 1:
-                raise httpx.ConnectError("connection refused")
+                raise httpx2.ConnectError("connection refused")
             raise ApiError("no", code="idempotency_key_reuse", http_status=422)
 
     low = _ConnectThenRefusedLow()
@@ -1366,7 +1366,7 @@ def test_a_released_429_is_skipped_in_favour_of_the_claim_that_followed_it() -> 
             raise ApiError("no", code="idempotency_key_reuse", http_status=422)
 
     low = _ThrottledThenDeadlineThenRefusedLow()
-    with pytest.raises(ComfyError) as excinfo:
+    with pytest.raises(TurbineError) as excinfo:
         _models(low, FAST).run(MODEL, ARGS)
     assert len(low.keys) == 3
     assert excinfo.value.http_status == 504
@@ -1380,8 +1380,8 @@ def test_resend_refused_is_false_on_an_ordinary_failure(server) -> None:
     # server refused. Everything else reads False, so a wrapper can test it
     # without guarding for the attribute being absent.
     server.state.model_run_error = (500, "internal_error")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.resend_refused is False
 
@@ -1396,7 +1396,7 @@ async def test_the_async_loop_applies_the_same_claim_rules() -> None:
         def _attempt(self, arguments: Mapping[str, Any], key: str | None) -> dict[str, Any]:
             self.keys.append(key)
             if len(self.keys) == 1:
-                raise httpx.ConnectError("connection refused")
+                raise httpx2.ConnectError("connection refused")
             raise ApiError("no", code="idempotency_key_reuse", http_status=422)
 
     low = _AsyncConnectThenRefusedLow()
@@ -1412,7 +1412,7 @@ async def test_the_async_loop_applies_the_same_claim_rules() -> None:
             raise ApiError("no", code="idempotency_key_reuse", http_status=422)
 
     low2 = _AsyncServerErrorThenRefusedLow()
-    with pytest.raises(ComfyError) as excinfo:
+    with pytest.raises(TurbineError) as excinfo:
         await _async_models(low2, FAST_OPTED_IN).run(MODEL, ARGS)
     assert excinfo.value.http_status == 500
     assert excinfo.value.resend_refused is True
@@ -1451,7 +1451,7 @@ def test_the_body_is_snapshotted_deeply_before_the_first_attempt(server) -> None
                 arguments["config"]["steps"] = 999
                 raise
 
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         models = Models(cast(Any, _MutatingLow(client._low)), FAST)
         assert models.run(MODEL, arguments) == server.state.model_run_result
     assert server.state.model_run_count == 2
@@ -1474,7 +1474,7 @@ def test_a_router_shaped_in_flight_409_is_collected_at_the_named_pace(server) ->
     server.state.model_run_transient_error = (409, "concurrency_limit_exceeded")
     server.state.model_run_retry_after = "0"
     server.state.model_run_fail_times = 2
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
     assert server.state.model_run_count == 3
     keys = server.state.model_run_idempotency_keys
@@ -1485,13 +1485,13 @@ def test_a_router_shaped_in_flight_409_is_collected_at_the_named_pace(server) ->
 def test_a_router_shaped_invalid_input_409_keeps_its_bucket_and_is_not_retried(server) -> None:
     # The other declared 409: a key that cannot serve this request, answered by
     # a NEW key — deterministic, so never resent, and never `HashMismatch`.
-    from comfy_low.errors import HashMismatch
+    from turbine_low.errors import HashMismatch
 
     server.state.model_run_router_error_shape = True
     server.state.model_run_error = (409, "invalid_input")
     server.state.model_run_retry_after = "1"
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert server.state.model_run_count == 1
     assert excinfo.value.code == "invalid_input"
@@ -1503,11 +1503,11 @@ def test_a_repeated_key_is_refused_409_invalid_input_not_422(server) -> None:
     # the record allows it, 409 invalid_input in Router's shape when it does
     # not — the 422 the jobs surface answers must not leak onto this route.
     server.state.model_run_error = (500, "internal_error")
-    with Comfy(retry=FAST) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS, idempotency_key="one-shot-key-1")
         server.state.model_run_error = None
-        with pytest.raises(ComfyError) as excinfo:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS, idempotency_key="one-shot-key-1")
     assert excinfo.value.http_status == 409
     assert excinfo.value.code == "invalid_input"
@@ -1524,7 +1524,7 @@ def test_a_key_the_contract_cannot_carry_is_refused_locally(server, bad_key: str
     # an HTTP header. The empty string is the load-bearing case: it used to
     # fall into the mint-one branch, silently dispatching a SECOND billed
     # generation on what the caller meant as a collect.
-    with Comfy(retry=FAST) as client:
+    with Turbine(retry=FAST, router_base_url=server.base_url) as client:
         with pytest.raises(ValueError):
             client.models.run(MODEL, ARGS, idempotency_key=bad_key)
     assert server.state.model_run_count == 0

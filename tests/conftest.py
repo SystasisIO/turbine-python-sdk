@@ -3,8 +3,8 @@
 Keeps the SDK's own test suite independent of a real v2 server or proxy. Each
 test configures ``server.state`` to drive a specific scenario (dedup hit, hash
 mismatch, queue-full-then-ok, SSE reconnect, ...); the ``server`` fixture points
-the SDK at the stub by setting ``COMFY_BASE_URL`` *and*
-``COMFY_ROUTER_BASE_URL``.
+the SDK at the stub by setting ``TURBINE_BASE_URL`` *and*
+``TURBINE_ROUTER_BASE_URL``.
 
 Both, because the SDK speaks to two surfaces: the ``/api/v2`` deployment (jobs,
 assets) and Comfy Router (``/v2/models/{provider}/{model}``), which is a
@@ -12,7 +12,7 @@ different host in production. This one stub answers three route families — the
 ``/api/v2`` paths, the awaited model run, and the queued model routes under
 ``.../requests`` — so a test that exercises any of them gets a single server
 — while a test that is *about*
-the two being separate points ``COMFY_ROUTER_BASE_URL`` at ``second_server``.
+the two being separate points ``TURBINE_ROUTER_BASE_URL`` at ``second_server``.
 """
 
 from __future__ import annotations
@@ -28,11 +28,28 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
-from comfy_sdk import API_KEY_ENV_VAR, BASE_URL_ENV_VAR, ROUTER_BASE_URL_ENV_VAR
+from turbine_sdk import API_KEY_ENV_VAR, BASE_URL_ENV_VAR
 
 
 @dataclass
 class ServerState:
+    # Native extension knobs, shared by object-info and prompt estimate routes.
+    native_catalog: dict[str, Any] = field(
+        default_factory=lambda: {"Example": {"input": {"required": {}}, "output": ["IMAGE"]}}
+    )
+    native_estimate: dict[str, Any] = field(
+        default_factory=lambda: {"total": None, "nodes": [], "breakdown_complete": False}
+    )
+    native_deployment_prefix: str = ""
+    native_status: int = 200
+    native_body: Any = None
+    native_raw_body: bytes | None = None
+    native_delay: float = 0.0
+    native_response_headers: dict[str, str] = field(default_factory=dict)
+    native_paths: list[str] = field(default_factory=list)
+    native_headers: list[dict[str, str]] = field(default_factory=list)
+    native_prompts: list[dict[str, Any]] = field(default_factory=list)
+    http_requests: list[tuple[str, str]] = field(default_factory=list)
     # Blobs the platform "already has" (for the dedup fast-path).
     known_hashes: set[str] = field(default_factory=set)
     # The authoritative server-side hash returned for uploads.
@@ -211,7 +228,7 @@ class ServerState:
     # idempotency_key_reuse) instead of the router contract's replay-or-409.
     # Default False: the run route's vendored contract answers a consumed,
     # non-replayable key 409 invalid_input in Router's own shape. True models
-    # the deployment `COMFY_ROUTER_BASE_URL` can name that applies the v2 rule.
+    # the deployment `TURBINE_ROUTER_BASE_URL` can name that applies the v2 rule.
     model_run_v2_key_rule: bool = False
     # Answer model-run failures in Router's own error shape -- the coarse bucket
     # on `X-Comfy-Error-Type` plus a `{detail, error_type}` body -- instead of
@@ -573,6 +590,7 @@ def _make_handler(state: ServerState):
             # not — attached to a given request.
             state.last_auth_header = self.headers.get("Authorization", "")
             state.last_user_agent = self.headers.get("User-Agent", "")
+            state.http_requests.append((self.command, self.path))
             if not state.require_auth:
                 return True
             return bool(state.last_auth_header)
@@ -611,6 +629,16 @@ def _make_handler(state: ServerState):
         def do_GET(self) -> None:
             if not self._auth_ok():
                 self._err(401, "unauthorized", "no key")
+                return
+
+            native_path = urlsplit(self.path).path.removeprefix(state.native_deployment_prefix)
+            if native_path == "/api/object_info":
+                self._native_reply(state.native_catalog)
+                return
+            if native_path.startswith("/api/object_info/"):
+                class_type = unquote(native_path.removeprefix("/api/object_info/"))
+                definition = state.native_catalog.get(class_type)
+                self._native_reply({class_type: definition} if definition is not None else {})
                 return
 
             m = re.match(r"/api/v2/assets/([^/]+)/content$", self.path)
@@ -812,6 +840,12 @@ def _make_handler(state: ServerState):
                 self._err(401, "unauthorized", "no key")
                 return
 
+            native_path = urlsplit(self.path).path.removeprefix(state.native_deployment_prefix)
+            if native_path == "/api/prompt/estimate":
+                state.native_prompts.append(json.loads(self._read_body()))
+                self._native_reply(state.native_estimate)
+                return
+
             if self.path == "/api/v2/assets":
                 self._post_assets()
                 return
@@ -823,7 +857,7 @@ def _make_handler(state: ServerState):
                 return
             # Comfy Router's invocation route — a different surface from the
             # `/api/v2` paths above (a different host in production; the same
-            # stub here, with `COMFY_ROUTER_BASE_URL` pointed at it). The two
+            # stub here, with `TURBINE_ROUTER_BASE_URL` pointed at it). The two
             # segments are the model id, so they are matched rather than
             # compared to a fixed string.
             m = re.match(r"/v2/models/([^/]+)/([^/]+)$", self.path)
@@ -840,6 +874,25 @@ def _make_handler(state: ServerState):
                 return
             self._read_body()
             self._err(404, "not_found")
+
+        def _native_reply(self, payload: dict[str, Any]) -> None:
+            state.native_paths.append(self.path)
+            state.native_headers.append(dict(self.headers.items()))
+            if state.native_delay:
+                time.sleep(state.native_delay)
+            if state.native_raw_body is not None:
+                self._raw(
+                    state.native_status,
+                    state.native_raw_body,
+                    "application/json",
+                    state.native_response_headers,
+                )
+                return
+            self._json(
+                state.native_status,
+                state.native_body if state.native_body is not None else payload,
+                state.native_response_headers,
+            )
 
         def _post_assets(self) -> None:
             state.upload_count += 1
@@ -1305,7 +1358,7 @@ def _stop_server(srv: _Server) -> None:
 
 @pytest.fixture(autouse=True)
 def _no_ambient_base_url(request, monkeypatch):
-    """Keep a developer's own ``COMFY_BASE_URL`` out of the suite.
+    """Keep a developer's own ``TURBINE_BASE_URL`` out of the suite.
 
     ``tests/integration`` is the exception — that suite is pointed at a live
     deployment by this very variable. Restoring it through ``monkeypatch``
@@ -1314,15 +1367,11 @@ def _no_ambient_base_url(request, monkeypatch):
     if "integration" in request.path.parts:
         return
     monkeypatch.delenv(BASE_URL_ENV_VAR, raising=False)
-    # The Router target too: a developer with `COMFY_ROUTER_BASE_URL` exported
-    # would otherwise send every `models.run` test at their own host — and the
-    # default-value assertions would pass or fail on their shell, not the code.
-    monkeypatch.delenv(ROUTER_BASE_URL_ENV_VAR, raising=False)
 
 
 @pytest.fixture(autouse=True)
 def _no_ambient_api_key(monkeypatch):
-    """Never let the developer's own ``COMFY_API_KEY`` reach a test client.
+    """Never let the developer's own ``TURBINE_API_KEY`` reach a test client.
 
     Autouse and unconditional: the SDK now falls back to that variable, so a key
     exported in the shell (or on a CI runner running the live gateway e2e job)
@@ -1338,14 +1387,9 @@ def _no_ambient_api_key(monkeypatch):
 def server(monkeypatch):
     srv = _start_server()
     # Clients read their target from the environment, so pointing them at the
-    # stub is part of standing it up: tests just construct ``Comfy()``.
+    # stub is part of standing it up: tests just construct ``Turbine()``.
     monkeypatch.setenv(BASE_URL_ENV_VAR, srv.base_url)
-    # Both targets, because the SDK has two: jobs and assets resolve under
-    # `COMFY_BASE_URL`, model runs under `COMFY_ROUTER_BASE_URL`. The one stub
-    # serves both route families, so pointing both here keeps a `models.run`
-    # test a single-server test — the *separate*-origin cases point this second
-    # variable at `second_server` themselves.
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, srv.base_url)
+    # Router tests opt in explicitly with router_base_url=srv.base_url.
     try:
         yield srv
     finally:

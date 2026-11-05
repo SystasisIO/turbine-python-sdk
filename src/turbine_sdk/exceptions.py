@@ -1,15 +1,15 @@
-"""Idiomatic ``comfy_sdk`` exceptions.
+"""Idiomatic ``turbine_sdk`` exceptions.
 
-These wrap the protocol-level ``comfy_low.ApiError`` codes with names an
+These wrap the protocol-level ``turbine_low.ApiError`` codes with names an
 integrator catches directly (``JobFailed``, ``QueueFull``, ...). ``to_sdk_error``
 maps a raised ``ApiError`` to the right subclass; anything unmapped stays a
-``ComfyError`` carrying the original code.
+``TurbineError`` carrying the original code.
 
-**This module and :mod:`comfy_sdk.router_exceptions` share classes, they do not
+**This module and :mod:`turbine_sdk.router_exceptions` share classes, they do not
 shadow each other.** Every name the two modules both export is one class object
 re-exported, never two classes wearing one name -- so
-``comfy_sdk.exceptions.InsufficientCredits is
-comfy_sdk.router_exceptions.InsufficientCredits``, and an
+``turbine_sdk.exceptions.InsufficientCredits is
+turbine_sdk.router_exceptions.InsufficientCredits``, and an
 ``except InsufficientCredits`` written against either import catches whatever
 the other one does. ``tests/test_exception_modules.py`` enumerates both
 modules' exports and fails on any shared name that is not the same object, so
@@ -18,7 +18,7 @@ this cannot drift back apart.
 It did drift apart once, and the failure mode is why the rule is now a test:
 the classes ``to_sdk_error`` raised for a Router refusal were this module's, and
 this module's did not descend from
-:class:`~comfy_sdk.router_exceptions.RouterError`. ``except RouterError`` --
+:class:`~turbine_sdk.router_exceptions.RouterError`. ``except RouterError`` --
 the obvious catch-all, and the one a careful caller reaches for over
 ``except Exception`` -- therefore caught nothing at all on the buckets whose
 names the two modules shared.
@@ -31,12 +31,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, TypeVar
 
-import httpx
+import httpx2
 
-from comfy_low.errors import _CANCEL_REFUSAL_STATUS, ApiError
-from comfy_low.models import JobError
+from turbine_low.errors import _CANCEL_REFUSAL_STATUS, ApiError
+from turbine_low.models import JobError
 
-from ._errors import ComfyError
+from ._errors import TurbineError
 from .router_exceptions import (
     _BY_CANCEL_REFUSAL,
     _BY_ERROR_TYPE,
@@ -50,22 +50,20 @@ from .router_exceptions import (
 )
 
 
-class MissingApiKey(ComfyError):
-    """No credential could be resolved for a surface that requires one.
+class MissingApiKey(TurbineError):
+    """A credential required by an integration has not been provided.
 
-    Raised locally at client construction — before any request — when neither an
-    explicit ``api_key`` argument nor ``COMFY_API_KEY`` supplied a key and the
-    target is Comfy Cloud. Distinct from :class:`Unauthorized`, which is the
-    server rejecting a key that *was* sent. The message names the environment
-    variable, and never contains a key (there is none to contain).
+    Available for integrations that require local authentication checks.
+    Turbine clients accept a missing SDK key; server authentication failures
+    are represented by :class:`Unauthorized`.
     """
 
 
-class NotFound(ComfyError):
+class NotFound(TurbineError):
     pass
 
 
-class InvalidWorkflow(ComfyError):
+class InvalidWorkflow(TurbineError):
     """Structural/validation failure; ``details`` carries per-node errors."""
 
 
@@ -73,25 +71,25 @@ class WorkflowFormatUi(InvalidWorkflow):
     """UI-export JSON was submitted instead of the API-format graph."""
 
 
-class MissingAsset(ComfyError):
+class MissingAsset(TurbineError):
     """A ``core/ASSET`` reference was not usable (unknown/unscanned/not owned)."""
 
 
-class HashMismatch(ComfyError):
+class HashMismatch(TurbineError):
     """Uploaded bytes did not match the declared ``expected_hash``."""
 
 
-class BlobNotFound(ComfyError):
+class BlobNotFound(TurbineError):
     """from-hash / existence probe found no blob the caller can mint from."""
 
 
-class IdempotencyKeyReuse(ComfyError):
+class IdempotencyKeyReuse(TurbineError):
     """The idempotency key was reused. Keys are single-use (reject-on-duplicate,
     no replay): any second request with the same key — a retry, a concurrent
     duplicate, or the same key with a different body — is rejected."""
 
 
-class QueueFull(ComfyError):
+class QueueFull(TurbineError):
     """Backpressure: the queue is full. ``retry_after`` is seconds to wait."""
 
     def __init__(self, message: str, *, retry_after: int, **kw: Any) -> None:
@@ -99,7 +97,7 @@ class QueueFull(ComfyError):
         self.retry_after = retry_after
 
 
-class JobFailed(ComfyError):
+class JobFailed(TurbineError):
     """A job reached a non-success terminal state.
 
     ``error`` carries the node-level detail (``.code``, ``.node_id``,
@@ -113,18 +111,18 @@ class JobFailed(ComfyError):
 
 #: Wire ``code`` -> the class this SDK raises for it. Only the codes the v2
 #: envelope owns are listed here; the Router buckets are looked up in
-#: :data:`comfy_sdk.router_exceptions._BY_ERROR_TYPE` instead, so that table
+#: :data:`turbine_sdk.router_exceptions._BY_ERROR_TYPE` instead, so that table
 #: stays the single copy of the contract's closed set.
 #:
 #: Three entries -- ``insufficient_credits``, ``unauthorized``, ``forbidden`` --
-#: name classes that live in :mod:`comfy_sdk.router_exceptions` and descend from
-#: :class:`~comfy_sdk.router_exceptions.RouterError`. That is deliberate and it
+#: name classes that live in :mod:`turbine_sdk.router_exceptions` and descend from
+#: :class:`~turbine_sdk.router_exceptions.RouterError`. That is deliberate and it
 #: is the fix: both surfaces spell those buckets identically, the wire ``code``
 #: alone cannot say which surface answered, and raising a class that is *not* a
 #: ``RouterError`` for a Router refusal is what made ``except RouterError`` a
 #: dead handler. One class per bucket, reachable from both modules, is the only
 #: shape where neither ``except`` clause is wrong.
-_BY_CODE: dict[str, type[ComfyError]] = {
+_BY_CODE: dict[str, type[TurbineError]] = {
     "invalid_workflow": InvalidWorkflow,
     "workflow_format_ui": WorkflowFormatUi,
     "missing_asset": MissingAsset,
@@ -144,7 +142,7 @@ _BY_CODE: dict[str, type[ComfyError]] = {
 }
 
 
-def _class_for(exc: ApiError) -> type[ComfyError]:
+def _class_for(exc: ApiError) -> type[TurbineError]:
     """The class ``exc`` becomes, from its wire ``code`` and its surface.
 
     Three lookups in precedence order, then a fallback that depends on which
@@ -152,29 +150,29 @@ def _class_for(exc: ApiError) -> type[ComfyError]:
 
     1. :data:`_BY_CODE` -- the v2 envelope's codes, plus the three buckets both
        surfaces spell the same way.
-    2. :data:`~comfy_sdk.router_exceptions._BY_ERROR_TYPE` -- the Router
+    2. :data:`~turbine_sdk.router_exceptions._BY_ERROR_TYPE` -- the Router
        contract's closed set. The low layer preserves Router's bucket as the
        ``code`` for every status, so this is what turns a preserved
-       ``not_enabled`` into the :class:`~comfy_sdk.router_exceptions.NotEnabled`
+       ``not_enabled`` into the :class:`~turbine_sdk.router_exceptions.NotEnabled`
        a pre-launch caller catches.
-    3. :data:`~comfy_sdk.router_exceptions._BY_CANCEL_REFUSAL` -- the cancel
+    3. :data:`~turbine_sdk.router_exceptions._BY_CANCEL_REFUSAL` -- the cancel
        route's refusals, which the contract's bucket list does not name because
        they are not run-route buckets. Consulted only for a ``409``: the lookup
        is on ``code``, and ``code`` is also whatever a v2 envelope's
        ``error.code`` said, on any route at any status, so without the status
        gate an unrelated failure that happened to spell ``already_completed``
-       inherited :class:`~comfy_sdk.router_exceptions.AlreadyCompleted` and the
+       inherited :class:`~turbine_sdk.router_exceptions.AlreadyCompleted` and the
        benign "still collectable" reading that class documents.
 
     The fallback is where the *surface* matters.
-    :attr:`comfy_low.errors.ApiError.error_type` is set only when the response
+    :attr:`turbine_low.errors.ApiError.error_type` is set only when the response
     identified itself as Router's, so a bucket added to Router after this SDK
     version was built still reaches the caller as a
-    :class:`~comfy_sdk.router_exceptions.RouterError` -- the forward-compatible
-    answer :func:`~comfy_sdk.router_exceptions.exception_for` already gives on
+    :class:`~turbine_sdk.router_exceptions.RouterError` -- the forward-compatible
+    answer :func:`~turbine_sdk.router_exceptions.exception_for` already gives on
     the queued surface, and without it ``except RouterError`` would still have a
     hole on exactly the refusals nobody could have enumerated in advance.
-    Anything else stays a bare ``ComfyError`` carrying the original code.
+    Anything else stays a bare ``TurbineError`` carrying the original code.
     """
     cls = _BY_CODE.get(exc.code) or _BY_ERROR_TYPE.get(exc.code)
     if cls is None and exc.http_status == _CANCEL_REFUSAL_STATUS:
@@ -190,10 +188,10 @@ def _class_for(exc: ApiError) -> type[ComfyError]:
         cls = _BY_CANCEL_REFUSAL.get(exc.code)
     if cls is not None:
         return cls
-    return RouterError if exc.error_type is not None else ComfyError
+    return RouterError if exc.error_type is not None else TurbineError
 
 
-def to_sdk_error(exc: ApiError) -> ComfyError:
+def to_sdk_error(exc: ApiError) -> TurbineError:
     """Translate a protocol ``ApiError`` into the idiomatic SDK exception."""
     # `str(exc)`, not `exc.message`: they differ only when the protocol error
     # carries a body excerpt — a response that stated no message of its own —
@@ -217,13 +215,13 @@ def to_sdk_error(exc: ApiError) -> ComfyError:
         # carries — is forwarded too: nothing about a shared bucket says the
         # response cannot have sent one.
         #
-        # `errors=` is the conversion the layering rule forces: `comfy_low`
+        # `errors=` is the conversion the layering rule forces: `turbine_low`
         # carries a Router validation body's `detail[]` entries up raw because
-        # it may not import `comfy_sdk`, and this is the boundary that can type
+        # it may not import `turbine_sdk`, and this is the boundary that can type
         # them. Without it `.errors` was empty on the whole `models.run` path
         # while the documented contract says it is populated whenever the
         # response carried the array. `_detail_from` is a plain module-level
-        # import now that `ComfyError` lives in `comfy_sdk._errors` — the cycle
+        # import now that `TurbineError` lives in `turbine_sdk._errors` — the cycle
         # that forced the lazy one is what this change removed.
         return cls(
             str(exc),
@@ -267,7 +265,7 @@ def to_sdk_error(exc: ApiError) -> ComfyError:
 
 #: What an ``idempotency_key=`` gets stamped onto. Deliberately not
 #: "everything": these are the failures of the *call* — the SDK's own errors
-#: (which includes every ``RouterError``) and an httpx failure that means the
+#: (which includes every ``RouterError``) and an httpx2 failure that means the
 #: request did not complete. Anything else leaving the block is a bug in the
 #: SDK or the caller's own code, where a key is noise, and a ``KeyboardInterrupt``
 #: must not be touched at all.
@@ -279,14 +277,14 @@ def to_sdk_error(exc: ApiError) -> ComfyError:
 #: the case the key exists to collect. It is re-raised bare like the rest of
 #: this branch, so nothing is swallowed and the cancellation still propagates.
 _STAMPABLE: tuple[type[BaseException], ...] = (
-    ComfyError,
-    httpx.HTTPError,
+    TurbineError,
+    httpx2.HTTPError,
     asyncio.CancelledError,
 )
 
 #: Attributes a stamped exception is guaranteed to answer to, defaulted to
 #: ``None`` on the ones that do not declare them. Kept beside
-#: :data:`_STAMPABLE` so an attribute added to :class:`ComfyError` for the
+#: :data:`_STAMPABLE` so an attribute added to :class:`TurbineError` for the
 #: caller to read inside an ``except`` block is added here too —
 #: ``tests/test_error_contract.py`` pins the pairing.
 _STAMPED_ATTRIBUTES = ("request_id", "retry_after")
@@ -303,13 +301,13 @@ def _stamp(exc: _E, idempotency_key: str | None) -> _E:
     """Attach ``idempotency_key`` to ``exc`` in place and hand it back.
 
     ``setattr`` rather than a constructor argument because the transport-level
-    members of :data:`_STAMPABLE` are httpx's classes, which this SDK does not
+    members of :data:`_STAMPABLE` are httpx2's classes, which this SDK does not
     build. A ``None`` key writes nothing, so an operation that sends no key
-    leaves ``ComfyError.idempotency_key`` at its class default.
+    leaves ``TurbineError.idempotency_key`` at its class default.
 
     The rest of :data:`_STAMPED_ATTRIBUTES` is defaulted alongside it, for the
-    same reason and onto exactly the same exceptions: :class:`ComfyError`
-    declares them on the class, but ``httpx.ConnectError`` and
+    same reason and onto exactly the same exceptions: :class:`TurbineError`
+    declares them on the class, but ``httpx2.ConnectError`` and
     ``asyncio.CancelledError`` do not — so without this the documented surface
     would be uniform on everything *except* the no-response failures it is most
     needed on, where ``exc.request_id`` would raise ``AttributeError`` instead
@@ -332,15 +330,15 @@ def _stamp(exc: _E, idempotency_key: str | None) -> _E:
 def translating(*, idempotency_key: str | None = None) -> Iterator[None]:
     """Re-raise any protocol ``ApiError`` as its idiomatic SDK exception.
 
-    Wrap the SDK-level operations that call ``comfy_low`` with this so integrators
-    only ever catch ``comfy_sdk`` exceptions (``MissingAsset``, ``HashMismatch``,
+    Wrap the SDK-level operations that call ``turbine_low`` with this so integrators
+    only ever catch ``turbine_sdk`` exceptions (``MissingAsset``, ``HashMismatch``,
     ``NotFound``, ...), never the raw protocol error.
 
     ``idempotency_key`` is the key the wrapped call was made under. Give it and
     every failure that leaves this block carries it as ``.idempotency_key`` —
     the one place that can, because the key is a local of the caller's frame and
     is otherwise lost the moment the exception propagates past it. That matters
-    on :meth:`comfy_sdk.models.Models.run`, where the router's replay contract
+    on :meth:`turbine_sdk.models.Models.run`, where the router's replay contract
     lets a caller who lost the response collect the generation they were already
     billed for by resending under the *same* key. Stamping here rather than in
     each exception's constructor is what makes an unrecognised ``error_type``,
@@ -353,7 +351,7 @@ def translating(*, idempotency_key: str | None = None) -> Iterator[None]:
         raise _stamp(to_sdk_error(exc), idempotency_key) from exc
     except _STAMPABLE as exc:
         # Already on a surface a caller catches — a RouterError the transport
-        # raised directly, an httpx failure with no response to translate, or a
+        # raised directly, an httpx2 failure with no response to translate, or a
         # cancellation of a call that may already be dispatched. Nothing to
         # convert, but the key still has to ride out with it. A bare `raise`
         # keeps the original traceback and the cancellation semantics, so with
@@ -364,17 +362,17 @@ def translating(*, idempotency_key: str | None = None) -> Iterator[None]:
 
 
 #: Explicit because several of these names are re-exports rather than
-#: definitions: :class:`~comfy_sdk.router_exceptions.RouterError` and the three
+#: definitions: :class:`~turbine_sdk.router_exceptions.RouterError` and the three
 #: buckets both surfaces spell the same way are defined in
-#: :mod:`comfy_sdk.router_exceptions`, and ``ComfyError`` in
-#: :mod:`comfy_sdk._errors` -- one class object each, so a name this module and
+#: :mod:`turbine_sdk.router_exceptions`, and ``TurbineError`` in
+#: :mod:`turbine_sdk._errors` -- one class object each, so a name this module and
 #: that one share is the *same* class and either import catches what the other
 #: does. ``tests/test_exception_modules.py`` reads this list to assert it.
 __all__ = [
     "AlreadyCompleted",
     "BlobNotFound",
     "CancelRefused",
-    "ComfyError",
+    "TurbineError",
     "Forbidden",
     "HashMismatch",
     "IdempotencyKeyReuse",

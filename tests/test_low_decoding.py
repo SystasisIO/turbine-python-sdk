@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import io
 
-from comfy_low._multipart import file_size_of
-from comfy_low.sse import RawEvent, SSEDecoder
+from turbine_low._multipart import file_size_of
+from turbine_low.sse import RawEvent, SSEDecoder
 
 
 def _feed(decoder: SSEDecoder, *lines: str) -> list[RawEvent]:

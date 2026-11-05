@@ -26,18 +26,18 @@ from typing import Any
 
 import pytest
 
-from comfy_low.transport import (
+from turbine_low.transport import (
     _MODEL_REQUEST_CANCEL_PATH_TEMPLATE,
     _MODEL_REQUEST_PATH_TEMPLATE,
     _MODEL_REQUEST_STATUS_PATH_TEMPLATE,
     _MODEL_REQUESTS_PATH_TEMPLATE,
     _MODEL_RUN_PATH_TEMPLATE,
 )
-from comfy_sdk import AsyncComfy, BinaryResult, Comfy, QueueUpdate
-from comfy_sdk.exceptions import ComfyError
-from comfy_sdk.model_requests import COMPLETED, AsyncRequestHandle, RequestHandle
-from comfy_sdk.retry import NO_RETRY
-from comfy_sdk.router_exceptions import (
+from turbine_sdk import AsyncTurbine, BinaryResult, QueueUpdate, Turbine
+from turbine_sdk.exceptions import TurbineError
+from turbine_sdk.model_requests import COMPLETED, AsyncRequestHandle, RequestHandle
+from turbine_sdk.retry import NO_RETRY
+from turbine_sdk.router_exceptions import (
     ContentPolicyViolation,
     NotEnabled,
     RouterError,
@@ -52,25 +52,27 @@ ARGS = {"prompt": "a red bicycle"}
 def fast_poll(monkeypatch):
     """Collapse the poll backoff so a multi-poll test is not a multi-second one.
 
-    Patched on ``comfy_sdk._core`` — the one place the schedule is defined —
+    Patched on ``turbine_sdk._core`` — the one place the schedule is defined —
     rather than on the handles, so both the sync and the async loop pick it up
     and neither can drift onto a second schedule.
     """
-    import comfy_sdk._core as core
+    import turbine_sdk._core as core
 
     monkeypatch.setattr(core, "backoff_schedule", lambda *a, **k: iter(lambda: 0.0, None))
     return None
 
 
-def _client(**kw: Any) -> Comfy:
-    return Comfy(api_key="comfyui-test-key", **kw)
+def _client(server, **kw: Any) -> Turbine:
+    return Turbine(
+        base_url=server.base_url, router_base_url=server.base_url, api_key="turbine-test-key", **kw
+    )
 
 
 # --- routes ----------------------------------------------------------------
 
 
 def test_submit_posts_to_the_requests_route_under_the_model_id(server, fast_poll) -> None:
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
 
     assert isinstance(handle, RequestHandle)
@@ -88,7 +90,7 @@ def test_submit_posts_to_the_requests_route_under_the_model_id(server, fast_poll
 
 def test_every_queue_route_is_addressed_by_both_ids(server, fast_poll) -> None:
     server.state.queue_polls_to_complete = 0
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
         handle.status()
         handle.get()
@@ -107,7 +109,7 @@ def test_every_queue_route_is_addressed_by_both_ids(server, fast_poll) -> None:
 
 def test_the_ids_are_percent_encoded_into_the_path(server, fast_poll) -> None:
     server.state.queue_request_id = "req id?x=1"
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit("acme/model name", ARGS)
         handle.status()
 
@@ -119,8 +121,8 @@ def test_the_ids_are_percent_encoded_into_the_path(server, fast_poll) -> None:
 def test_a_server_named_request_id_that_would_walk_the_path_is_refused(server) -> None:
     """A hostile or broken id fails at the submit, not three calls later."""
     server.state.queue_request_id = "../escape"
-    with _client() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with _client(server) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.submit(MODEL, ARGS)
 
     assert "cannot address a route" in str(excinfo.value)
@@ -132,7 +134,7 @@ def test_a_server_named_request_id_that_would_walk_the_path_is_refused(server) -
     [("one-segment", ValueError), ("a/b/c", ValueError), (object(), TypeError)],
 )
 def test_submit_rejects_a_malformed_model_id_before_any_request(server, model, expected) -> None:
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(expected):
             client.models.submit(model, ARGS)
     assert server.state.queue_submit_count == 0
@@ -145,7 +147,7 @@ def test_submit_rejects_a_malformed_model_id_before_any_request(server, model, e
 def test_handle_rejects_a_malformed_request_id_before_any_request(
     server, request_id, expected
 ) -> None:
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(expected):
             client.models.handle(MODEL, request_id)
     assert server.state.queue_status_count == 0
@@ -153,7 +155,7 @@ def test_handle_rejects_a_malformed_request_id_before_any_request(
 
 def test_handle_rehydrates_from_the_two_ids_without_a_request(server, fast_poll) -> None:
     """The other-process case: no submit here, only the ids."""
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.handle(MODEL, "req_from_elsewhere")
         assert (handle.model, handle.request_id) == (MODEL, "req_from_elsewhere")
         # Constructing it made no call at all — the first one is the poll.
@@ -166,8 +168,8 @@ def test_handle_rehydrates_from_the_two_ids_without_a_request(server, fast_poll)
 
 def test_a_submit_whose_response_names_no_request_id_is_an_error(server) -> None:
     server.state.queue_submit_omits_request_id = True
-    with _client() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with _client(server) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.submit(MODEL, ARGS)
     assert "request_id" in str(excinfo.value)
     # The key is still reachable, because the work may have been accepted.
@@ -179,7 +181,7 @@ def test_a_submit_whose_response_names_no_request_id_is_an_error(server) -> None
 
 def test_get_polls_to_completion_then_collects_the_result(server, fast_poll) -> None:
     server.state.queue_polls_to_complete = 3
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.submit(MODEL, ARGS).get()
 
     assert result == server.state.queue_result
@@ -200,7 +202,7 @@ def test_get_returns_a_binary_result_for_a_non_json_completion(server, fast_poll
     # generation away.
     server.state.queue_result_binary_body = b"\xff\xfb\x90\x64" + b"\xde\xad" * 64
     server.state.queue_result_binary_content_type = "audio/mpeg"
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.submit(MODEL, ARGS).get()
 
     assert isinstance(result, BinaryResult)
@@ -211,7 +213,7 @@ def test_get_returns_a_binary_result_for_a_non_json_completion(server, fast_poll
 def test_subscribe_returns_a_binary_result_too(server, fast_poll) -> None:
     server.state.queue_result_binary_body = b"binary generation"
     server.state.queue_result_binary_content_type = "audio/wav"
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.subscribe(MODEL, ARGS)
 
     assert isinstance(result, BinaryResult)
@@ -224,7 +226,7 @@ def test_iter_events_yields_the_first_state_every_change_and_the_completion(
 ) -> None:
     server.state.queue_polls_to_complete = 3
     server.state.queue_start_position = 2
-    with _client() as client:
+    with _client(server) as client:
         updates = list(client.models.submit(MODEL, ARGS).iter_events())
 
     assert [u.status for u in updates] == ["IN_QUEUE", "IN_QUEUE", "IN_QUEUE", COMPLETED]
@@ -238,7 +240,7 @@ def test_an_unchanged_poll_is_not_re_reported(server, fast_poll) -> None:
     """A queue that has not moved must not redraw the caller's progress bar."""
     server.state.queue_polls_to_complete = 4
     server.state.queue_start_position = 0  # every pending poll reports position 0
-    with _client() as client:
+    with _client(server) as client:
         updates = list(client.models.submit(MODEL, ARGS).iter_events())
 
     assert [u.status for u in updates] == ["IN_QUEUE", COMPLETED]
@@ -250,7 +252,7 @@ def test_an_unknown_status_is_not_treated_as_terminal(server, fast_poll) -> None
     collecting a result that does not exist yet."""
     server.state.queue_pending_status = "SOME_FUTURE_STATE"
     server.state.queue_polls_to_complete = 2
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.submit(MODEL, ARGS).get()
 
     assert result == server.state.queue_result
@@ -260,11 +262,11 @@ def test_an_unknown_status_is_not_treated_as_terminal(server, fast_poll) -> None
 def test_a_server_named_retry_after_paces_the_poll(server, monkeypatch) -> None:
     """``Retry-After`` on a *successful* poll beats the local backoff."""
     slept: list[float] = []
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", slept.append)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", slept.append)
     server.state.queue_polls_to_complete = 2
     server.state.queue_status_retry_after = "7"
 
-    with _client() as client:
+    with _client(server) as client:
         client.models.submit(MODEL, ARGS).get()
 
     # One sleep per pending poll, each at the server's pace rather than the
@@ -275,11 +277,11 @@ def test_a_server_named_retry_after_paces_the_poll(server, monkeypatch) -> None:
 def test_a_useless_retry_after_falls_back_to_the_backoff(server, monkeypatch) -> None:
     """``Retry-After: 0`` names no pace and must not become a zero-delay loop."""
     slept: list[float] = []
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", slept.append)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", slept.append)
     server.state.queue_polls_to_complete = 2
     server.state.queue_status_retry_after = "0"
 
-    with _client() as client:
+    with _client(server) as client:
         client.models.submit(MODEL, ARGS).get()
 
     assert slept and all(delay > 0 for delay in slept)
@@ -288,11 +290,11 @@ def test_a_useless_retry_after_falls_back_to_the_backoff(server, monkeypatch) ->
 def test_a_throttled_poll_is_retried_under_the_client_policy(
     server, fast_poll, monkeypatch
 ) -> None:
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", lambda _s: None)
     server.state.queue_polls_to_complete = 0
     server.state.queue_status_fail_times = 2  # 429 rate_limited, twice
 
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.submit(MODEL, ARGS).get()
 
     assert result == server.state.queue_result
@@ -306,7 +308,7 @@ def test_a_throttled_poll_raises_when_the_client_does_not_retry(server, fast_pol
     server.state.queue_polls_to_complete = 0
     server.state.queue_status_fail_times = 1
 
-    with _client(retry=NO_RETRY) as client:
+    with _client(server, retry=NO_RETRY) as client:
         handle = client.models.submit(MODEL, ARGS)
         with pytest.raises(RouterError) as excinfo:
             handle.status()
@@ -323,7 +325,7 @@ def test_a_completed_status_carrying_an_error_type_raises_the_typed_error(
     server.state.queue_error_type = "content_policy_violation"
     server.state.queue_error_detail = "the prompt was refused"
 
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(ContentPolicyViolation) as excinfo:
             client.models.submit(MODEL, ARGS).get()
 
@@ -339,7 +341,7 @@ def test_an_error_type_on_the_result_body_alone_still_raises(server, fast_poll) 
     server.state.queue_polls_to_complete = 0
     server.state.queue_result_error_type = "provider_error"
 
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(RouterError) as excinfo:
             client.models.submit(MODEL, ARGS).get()
 
@@ -358,7 +360,7 @@ def test_a_providers_own_error_type_field_is_not_mistaken_for_a_failure(server, 
     server.state.queue_polls_to_complete = 0
     server.state.queue_result_extra = {"error_type": "provider_error"}
 
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.submit(MODEL, ARGS).get()
 
     assert result["error_type"] == "provider_error"
@@ -369,7 +371,7 @@ def test_an_unknown_error_type_still_raises_the_base_router_error(server, fast_p
     server.state.queue_polls_to_complete = 0
     server.state.queue_error_type = "a_bucket_from_the_future"
 
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(RouterError) as excinfo:
             client.models.submit(MODEL, ARGS).get()
 
@@ -382,7 +384,7 @@ def test_iter_events_reports_the_failure_as_data_rather_than_raising(server, fas
     server.state.queue_polls_to_complete = 0
     server.state.queue_error_type = "provider_error"
 
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
         updates = list(handle.iter_events())
         assert updates[-1].error_type == "provider_error"
@@ -402,7 +404,7 @@ def test_a_request_the_server_does_not_know_surfaces_as_the_servers_own_answer(
     """``handle`` makes no call, so an id that names nothing fails on the poll."""
     server.state.queue_status_error = (404, "model_not_found")
 
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.handle(MODEL, "req_that_never_existed")
         with pytest.raises(RouterError) as excinfo:
             handle.status()
@@ -415,7 +417,7 @@ def test_an_unflagged_caller_gets_the_servers_not_enabled_as_the_typed_error(ser
     """The surface is gated server side; the SDK's job is to type the refusal."""
     server.state.queue_submit_error = (403, "not_enabled")
 
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(NotEnabled) as excinfo:
             client.models.submit(MODEL, ARGS)
 
@@ -427,7 +429,7 @@ def test_an_unflagged_caller_gets_the_servers_not_enabled_as_the_typed_error(ser
 
 
 def test_each_submit_call_mints_a_fresh_key(server, fast_poll) -> None:
-    with _client() as client:
+    with _client(server) as client:
         client.models.submit(MODEL, ARGS)
         client.models.submit(MODEL, ARGS)
 
@@ -443,10 +445,10 @@ def test_a_transport_retry_of_one_submit_keeps_the_one_key(server, monkeypatch) 
     A fresh key per attempt would bill a retried submit as a second queued
     generation, which is the failure the one-key rule exists to prevent.
     """
-    monkeypatch.setattr("comfy_sdk.models.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.models.time.sleep", lambda _s: None)
     server.state.queue_submit_fail_times = 2  # two 429s, then accepted
 
-    with _client() as client:
+    with _client(server) as client:
         client.models.submit(MODEL, ARGS)
 
     keys = server.state.queue_submit_idempotency_keys
@@ -455,13 +457,13 @@ def test_a_transport_retry_of_one_submit_keeps_the_one_key(server, monkeypatch) 
 
 
 def test_an_explicit_key_is_used_verbatim(server, fast_poll) -> None:
-    with _client() as client:
+    with _client(server) as client:
         client.models.submit(MODEL, ARGS, idempotency_key="my-own-key-01")
     assert server.state.queue_submit_idempotency_keys == ["my-own-key-01"]
 
 
 def test_an_unusable_explicit_key_is_refused_locally(server) -> None:
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(ValueError):
             client.models.submit(MODEL, ARGS, idempotency_key="")
     assert server.state.queue_submit_count == 0
@@ -469,7 +471,7 @@ def test_an_unusable_explicit_key_is_refused_locally(server) -> None:
 
 def test_the_key_rides_out_on_a_failure(server) -> None:
     server.state.queue_submit_error = (400, "invalid_input")
-    with _client(retry=NO_RETRY) as client:
+    with _client(server, retry=NO_RETRY) as client:
         with pytest.raises(RouterError) as excinfo:
             client.models.submit(MODEL, ARGS, idempotency_key="key-for-recovery")
     assert excinfo.value.idempotency_key == "key-for-recovery"
@@ -479,7 +481,7 @@ def test_the_key_rides_out_on_a_failure(server) -> None:
 
 
 def test_cancel_asks_the_server_and_reports_what_it_said(server, fast_poll) -> None:
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
         update = handle.cancel()
 
@@ -490,7 +492,7 @@ def test_cancel_asks_the_server_and_reports_what_it_said(server, fast_poll) -> N
 
 def test_a_cancel_answered_with_no_body_still_identifies_the_request(server, fast_poll) -> None:
     server.state.queue_cancel_status = 204
-    with _client() as client:
+    with _client(server) as client:
         update = client.models.submit(MODEL, ARGS).cancel()
 
     assert update.request_id == server.state.queue_request_id
@@ -501,7 +503,7 @@ def test_subscribe_reports_progress_and_returns_the_result(server, fast_poll) ->
     server.state.queue_polls_to_complete = 2
     seen: list[QueueUpdate] = []
 
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.subscribe(MODEL, ARGS, on_queue_update=seen.append)
 
     assert result == server.state.queue_result
@@ -510,25 +512,25 @@ def test_subscribe_reports_progress_and_returns_the_result(server, fast_poll) ->
 
 def test_subscribe_needs_no_callback(server, fast_poll) -> None:
     server.state.queue_polls_to_complete = 1
-    with _client() as client:
+    with _client(server) as client:
         assert client.models.subscribe(MODEL, ARGS) == server.state.queue_result
 
 
 def test_subscribe_raises_the_typed_error_for_a_failed_completion(server, fast_poll) -> None:
     server.state.queue_polls_to_complete = 0
     server.state.queue_error_type = "content_policy_violation"
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(ContentPolicyViolation):
             client.models.subscribe(MODEL, ARGS)
 
 
 def test_subscribes_timeout_cancels_before_it_raises(server, monkeypatch) -> None:
     """Acceptance: a caller who has stopped waiting is not still paying."""
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", lambda _s: None)
     # Never completes on its own.
     server.state.queue_polls_to_complete = 10_000
 
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(TimeoutError):
             client.models.subscribe(MODEL, ARGS, timeout=0.0)
 
@@ -537,15 +539,15 @@ def test_subscribes_timeout_cancels_before_it_raises(server, monkeypatch) -> Non
 
 def test_a_failing_cancel_does_not_mask_the_timeout(server, monkeypatch) -> None:
     """Best-effort is literal: the timeout is the failure worth reporting."""
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", lambda _s: None)
     server.state.queue_polls_to_complete = 10_000
 
     def _explode(self: Any) -> None:
-        raise ComfyError("cancel is unreachable")
+        raise TurbineError("cancel is unreachable")
 
     monkeypatch.setattr(RequestHandle, "_cancel_best_effort", _explode)
 
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(TimeoutError):
             client.models.subscribe(MODEL, ARGS, timeout=0.0)
 
@@ -557,13 +559,13 @@ def test_a_callbacks_own_timeout_error_does_not_cancel_the_request(server, monke
     for reasons that have nothing to do with this wait; cancelling a healthy
     queued request on the strength of it would be a charge thrown away.
     """
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", lambda _s: None)
     server.state.queue_polls_to_complete = 3
 
     def _explodes(_update: QueueUpdate) -> None:
         raise TimeoutError("the callback's own HTTP call timed out")
 
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(TimeoutError, match="callback"):
             client.models.subscribe(MODEL, ARGS, on_queue_update=_explodes)
 
@@ -575,7 +577,7 @@ def test_subscribe_collects_without_a_second_status_poll(server, fast_poll) -> N
     one request spent on something it is holding."""
     server.state.queue_polls_to_complete = 2
 
-    with _client() as client:
+    with _client(server) as client:
         client.models.subscribe(MODEL, ARGS)
 
     # Two pending polls plus the completing one — and no fourth.
@@ -585,10 +587,10 @@ def test_subscribe_collects_without_a_second_status_poll(server, fast_poll) -> N
 
 def test_iter_events_does_not_cancel_on_its_own_timeout(server, monkeypatch) -> None:
     """A ``for`` loop over the queue must not be destructive."""
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", lambda _s: None)
     server.state.queue_polls_to_complete = 10_000
 
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
         with pytest.raises(TimeoutError):
             list(handle.iter_events(timeout=0.0))
@@ -599,11 +601,11 @@ def test_iter_events_does_not_cancel_on_its_own_timeout(server, monkeypatch) -> 
 def test_a_timeout_never_sleeps_past_the_deadline(server, monkeypatch) -> None:
     """A long server-named pace must not outlive the caller's own bound."""
     slept: list[float] = []
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", slept.append)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", slept.append)
     server.state.queue_polls_to_complete = 10_000
     server.state.queue_status_retry_after = "600"
 
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
         started = time.monotonic()
         with pytest.raises(TimeoutError):
@@ -644,7 +646,7 @@ def test_the_queue_routes_extend_the_run_route() -> None:
 
 def test_run_still_posts_to_its_own_route_and_returns_the_payload(server) -> None:
     """Acceptance: the queued surface must not have moved ``run`` an inch."""
-    with _client() as client:
+    with _client(server) as client:
         result = client.models.run(MODEL, ARGS)
 
     assert result == server.state.model_run_result
@@ -658,7 +660,7 @@ def test_run_still_posts_to_its_own_route_and_returns_the_payload(server) -> Non
 
 async def test_async_submit_and_get(server, fast_poll) -> None:
     server.state.queue_polls_to_complete = 2
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         handle = await client.models.submit(MODEL, ARGS)
         assert isinstance(handle, AsyncRequestHandle)
         assert await handle.get() == server.state.queue_result
@@ -667,7 +669,7 @@ async def test_async_submit_and_get(server, fast_poll) -> None:
 async def test_async_get_returns_a_binary_result_too(server, fast_poll) -> None:
     server.state.queue_result_binary_body = b"\xff\xfb\x90\x64" + b"\xde\xad" * 64
     server.state.queue_result_binary_content_type = "audio/mpeg"
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         handle = await client.models.submit(MODEL, ARGS)
         result = await handle.get()
 
@@ -678,14 +680,14 @@ async def test_async_get_returns_a_binary_result_too(server, fast_poll) -> None:
 
 async def test_async_iter_events(server, fast_poll) -> None:
     server.state.queue_polls_to_complete = 2
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         handle = await client.models.submit(MODEL, ARGS)
         statuses = [update.status async for update in handle.iter_events()]
     assert statuses == ["IN_QUEUE", "IN_QUEUE", COMPLETED]
 
 
 async def test_async_handle_rehydrates_without_a_request(server, fast_poll) -> None:
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         handle = await client.models.handle(MODEL, "req_elsewhere")
         assert server.state.queue_status_count == 0
         update = await handle.status()
@@ -700,7 +702,7 @@ async def test_async_subscribe_awaits_an_async_callback(server, fast_poll) -> No
         await asyncio.sleep(0)
         seen.append(update.status)
 
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         result = await client.models.subscribe(MODEL, ARGS, on_queue_update=_record)
 
     assert result == server.state.queue_result
@@ -711,10 +713,10 @@ async def test_async_subscribe_timeout_cancels_before_raising(server, monkeypatc
     async def _no_sleep(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr("comfy_sdk.model_requests.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("turbine_sdk.model_requests.asyncio.sleep", _no_sleep)
     server.state.queue_polls_to_complete = 10_000
 
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         with pytest.raises(TimeoutError):
             await client.models.subscribe(MODEL, ARGS, timeout=0.0)
 
@@ -724,7 +726,7 @@ async def test_async_subscribe_timeout_cancels_before_raising(server, monkeypatc
 async def test_async_completion_error_raises_the_typed_exception(server, fast_poll) -> None:
     server.state.queue_polls_to_complete = 0
     server.state.queue_error_type = "content_policy_violation"
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         handle = await client.models.submit(MODEL, ARGS)
         with pytest.raises(ContentPolicyViolation):
             await handle.get()
@@ -735,24 +737,24 @@ async def test_async_completion_error_raises_the_typed_exception(server, fast_po
 
 def test_a_blank_error_type_reads_as_no_error_on_an_update() -> None:
     """The update and the raising path read ``error_type`` the same way."""
-    import httpx
+    import httpx2
 
-    from comfy_sdk.model_requests import _update_from
+    from turbine_sdk.model_requests import _update_from
 
     body = {"status": COMPLETED, "error_type": "  "}
-    update = _update_from(body, httpx.Headers(), request_id="r")
+    update = _update_from(body, httpx2.Headers(), request_id="r")
 
     assert update.error_type is None
     assert error_from_completion(body) is None
 
 
 def test_an_update_carries_the_id_it_was_addressed_by() -> None:
-    import httpx
+    import httpx2
 
-    from comfy_sdk.model_requests import _update_from
+    from turbine_sdk.model_requests import _update_from
 
     body = {"request_id": "somebody-else\n", "status": "IN_QUEUE"}
-    update = _update_from(body, httpx.Headers(), request_id="mine")
+    update = _update_from(body, httpx2.Headers(), request_id="mine")
 
     assert update.request_id == "mine"
     assert update.raw == body
@@ -763,7 +765,7 @@ def test_a_result_that_is_not_a_json_object_is_returned_unchanged(server, fast_p
     server.state.queue_polls_to_complete = 0
     server.state.queue_result_raw = [{"url": "http://example.invalid/a.png"}]
 
-    with _client() as client:
+    with _client(server) as client:
         assert client.models.submit(MODEL, ARGS).get() == server.state.queue_result_raw
 
 
@@ -771,9 +773,9 @@ def test_a_status_read_naming_no_status_is_an_invalid_response(server, fast_poll
     """A ``200 {}`` from the authoritative read must not poll forever."""
     server.state.queue_status_omits_status = True
 
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
-        with pytest.raises(ComfyError) as excinfo:
+        with pytest.raises(TurbineError) as excinfo:
             handle.get()
 
     assert excinfo.value.code == "invalid_response"
@@ -781,12 +783,12 @@ def test_a_status_read_naming_no_status_is_an_invalid_response(server, fast_poll
 
 def test_a_huge_retry_after_is_capped_before_it_is_slept(server, monkeypatch) -> None:
     slept: list[float] = []
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", slept.append)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", slept.append)
     server.state.queue_polls_to_complete = 1
     # Parses as an int; `float()` of it would overflow.
     server.state.queue_status_retry_after = "9" * 400
 
-    with _client() as client:
+    with _client(server) as client:
         client.models.submit(MODEL, ARGS).get()
 
     assert slept == [60.0]
@@ -795,11 +797,11 @@ def test_a_huge_retry_after_is_capped_before_it_is_slept(server, monkeypatch) ->
 def test_a_timeout_bounds_the_poll_and_its_retries_not_only_the_sleep(server, monkeypatch) -> None:
     """``get(timeout=...)`` on a server that keeps throttling returns within the
     bound instead of riding the retry policy's whole minute."""
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", lambda _s: None)
     server.state.queue_status_fail_times = 10_000
 
     started = time.monotonic()
-    with _client() as client:
+    with _client(server) as client:
         handle = client.models.submit(MODEL, ARGS)
         with pytest.raises((RouterError, TimeoutError)):
             handle.get(timeout=0.5)
@@ -810,14 +812,14 @@ def test_a_timeout_bounds_the_poll_and_its_retries_not_only_the_sleep(server, mo
 def test_the_cleanup_cancel_after_a_timeout_does_not_ride_the_retry_policy(
     server, monkeypatch
 ) -> None:
-    monkeypatch.setattr("comfy_sdk.model_requests.time.sleep", lambda _s: None)
+    monkeypatch.setattr("turbine_sdk.model_requests.time.sleep", lambda _s: None)
     server.state.queue_polls_to_complete = 10_000
     # Every cancel is answered with a paced 429, which the full policy would
     # retry for the whole of its budget.
     server.state.queue_cancel_fail_times = 10_000
 
     started = time.monotonic()
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(TimeoutError):
             client.models.subscribe(MODEL, ARGS, timeout=0.0)
 
@@ -827,14 +829,14 @@ def test_the_cleanup_cancel_after_a_timeout_does_not_ride_the_retry_policy(
 
 @pytest.mark.parametrize("request_id", ["abc\n", "with\x00nul", "x" * 257])
 def test_handle_refuses_an_unprintable_or_oversized_request_id(server, request_id) -> None:
-    with _client() as client:
+    with _client(server) as client:
         with pytest.raises(ValueError):
             client.models.handle(MODEL, request_id)
 
 
 def test_cancel_is_a_put(server, fast_poll) -> None:
     """The contract's cancel is ``PUT``; a POST would be the wrong verb."""
-    with _client() as client:
+    with _client(server) as client:
         client.models.submit(MODEL, ARGS).cancel()
 
     assert server.state.queue_cancel_methods == ["PUT"]
@@ -853,7 +855,7 @@ async def test_async_subscribe_cancellation_requests_a_remote_cancel(server, mon
     real_sleep = asyncio.sleep
     pausing = asyncio.Event()
 
-    # `comfy_sdk.model_requests` imports the `asyncio` module itself, so this
+    # `turbine_sdk.model_requests` imports the `asyncio` module itself, so this
     # patch lands on the shared `asyncio.sleep` for the test's duration. It is
     # a pass-through that only *reports* the pause: every caller still waits
     # the delay it asked for, and the cancel below is what cuts the wait short.
@@ -861,9 +863,9 @@ async def test_async_subscribe_cancellation_requests_a_remote_cancel(server, mon
         pausing.set()
         await real_sleep(delay)
 
-    monkeypatch.setattr("comfy_sdk.model_requests.asyncio.sleep", _pause)
+    monkeypatch.setattr("turbine_sdk.model_requests.asyncio.sleep", _pause)
 
-    async with AsyncComfy(api_key="comfyui-test-key") as client:
+    async with AsyncTurbine(api_key="comfyui-test-key", router_base_url=server.base_url) as client:
         task = asyncio.ensure_future(client.models.subscribe(MODEL, ARGS))
         await pausing.wait()
         task.cancel()

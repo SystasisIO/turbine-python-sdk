@@ -1,6 +1,6 @@
 """``submit()`` stamps its ``Idempotency-Key`` onto whatever it raises.
 
-``Comfy.submit`` / ``AsyncComfy.submit`` mint a key per call and send it on
+``Turbine.submit`` / ``AsyncTurbine.submit`` mint a key per call and send it on
 ``POST /jobs``. Until now that key was a local of the submitting frame, so it
 died with any exception the call raised — and the caller of an auto-minted
 submit had no record of what had been sent. These tests pin the same contract
@@ -23,17 +23,17 @@ import asyncio
 import socket
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
-import comfy_sdk.client as _client_module
-from comfy_sdk import AsyncComfy, Comfy, ComfyError, IdempotencyKeyReuse, QueueFull
-from comfy_sdk.client import BASE_URL_ENV_VAR
+import turbine_sdk.client as _client_module
+from turbine_sdk import AsyncTurbine, IdempotencyKeyReuse, QueueFull, Turbine, TurbineError
+from turbine_sdk.client import BASE_URL_ENV_VAR
 
 _GRAPH = {"3": {"class_type": "KSampler", "inputs": {}}}
 
 
-def _wf(client: Comfy | AsyncComfy):
+def _wf(client: Turbine | AsyncTurbine):
     return client.workflows.from_json(_GRAPH)
 
 
@@ -73,11 +73,11 @@ class _StepClock:
 
 
 def test_a_failed_submit_exposes_the_exact_auto_minted_key(server) -> None:
-    # An unmapped code, so this lands on the base `ComfyError` — the stamp has
+    # An unmapped code, so this lands on the base `TurbineError` — the stamp has
     # to reach it, not only the typed subclasses.
     server.state.job_error = (422, "validation_error")
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.submit(_wf(client))
     (sent,) = server.state.jobs_idempotency_keys
     assert sent is not None
@@ -88,8 +88,8 @@ def test_a_failed_submit_exposes_the_exact_auto_minted_key(server) -> None:
 
 async def test_a_failed_async_submit_exposes_the_exact_auto_minted_key(server) -> None:
     server.state.job_error = (422, "validation_error")
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.submit(_wf(client))
     (sent,) = server.state.jobs_idempotency_keys
     assert sent is not None
@@ -98,8 +98,8 @@ async def test_a_failed_async_submit_exposes_the_exact_auto_minted_key(server) -
 
 def test_a_caller_supplied_key_round_trips_onto_the_exception(server) -> None:
     server.state.job_error = (422, "validation_error")
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.submit(_wf(client), idempotency_key="abc")
     assert excinfo.value.idempotency_key == "abc"
     assert server.state.jobs_idempotency_keys == ["abc"]
@@ -107,8 +107,8 @@ def test_a_caller_supplied_key_round_trips_onto_the_exception(server) -> None:
 
 async def test_a_caller_supplied_key_round_trips_on_the_async_client(server) -> None:
     server.state.job_error = (422, "validation_error")
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.submit(_wf(client), idempotency_key="abc-async")
     assert excinfo.value.idempotency_key == "abc-async"
     assert server.state.jobs_idempotency_keys == ["abc-async"]
@@ -118,14 +118,14 @@ def test_an_empty_caller_key_is_refused_before_any_request(server) -> None:
     # `""` used to fall into the mint-a-fresh-key branch: the caller's dedup
     # silently disabled, and the exception then reporting a key the caller
     # never passed. Validated like `models.run`'s key, before any bytes move.
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         with pytest.raises(ValueError, match="must not be empty"):
             client.submit(_wf(client), idempotency_key="")
     assert server.state.jobs_idempotency_keys == []
 
 
 async def test_an_invalid_caller_key_is_refused_before_any_async_request(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         with pytest.raises(ValueError, match="must not be empty"):
             await client.submit(_wf(client), idempotency_key="")
         with pytest.raises(ValueError, match="printable ASCII"):
@@ -144,7 +144,7 @@ def test_an_exhausted_queue_full_budget_carries_the_retried_key(server, monkeypa
     server.state.queue_full_times = 1_000_000
     monkeypatch.setattr(_client_module, "_now", _StepClock())
     monkeypatch.setattr(_client_module, "_QUEUE_RETRY_BUDGET", 3.0)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         with pytest.raises(QueueFull) as excinfo:
             client.submit(_wf(client))
     sent = server.state.jobs_idempotency_keys
@@ -159,7 +159,7 @@ async def test_an_exhausted_async_queue_full_budget_carries_the_retried_key(
     server.state.queue_full_times = 1_000_000
     monkeypatch.setattr(_client_module, "_now", _StepClock())
     monkeypatch.setattr(_client_module, "_QUEUE_RETRY_BUDGET", 3.0)
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         with pytest.raises(QueueFull) as excinfo:
             await client.submit(_wf(client))
     sent = server.state.jobs_idempotency_keys
@@ -175,7 +175,7 @@ def test_a_rejected_reused_key_is_the_key_on_the_exception(server) -> None:
     # `POST /jobs` keys are single-use: the second call under the same key is
     # refused rather than replayed. The exception names the key that was
     # rejected, which is what a caller polls or lists for the first job by.
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.submit(_wf(client), idempotency_key="reused-01")
         with pytest.raises(IdempotencyKeyReuse) as excinfo:
             client.submit(_wf(client), idempotency_key="reused-01")
@@ -184,7 +184,7 @@ def test_a_rejected_reused_key_is_the_key_on_the_exception(server) -> None:
 
 
 async def test_a_rejected_reused_key_is_the_key_on_the_async_exception(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.submit(_wf(client), idempotency_key="reused-02")
         with pytest.raises(IdempotencyKeyReuse) as excinfo:
             await client.submit(_wf(client), idempotency_key="reused-02")
@@ -196,24 +196,24 @@ async def test_a_rejected_reused_key_is_the_key_on_the_async_exception(server) -
 
 def test_a_transport_level_failure_carries_the_key(monkeypatch) -> None:
     # Nothing to translate — no response reached the client — so before this
-    # the httpx error escaped `submit()` untouched and the caller was left with
+    # the httpx2 error escaped `submit()` untouched and the caller was left with
     # a request that may or may not have created a job and no key to look for
     # it by.
     monkeypatch.setenv(BASE_URL_ENV_VAR, f"http://127.0.0.1:{_closed_port()}")
-    with Comfy() as client:
-        with pytest.raises(httpx.ConnectError) as excinfo:
+    with Turbine() as client:
+        with pytest.raises(httpx2.ConnectError) as excinfo:
             client.submit(_wf(client))
     assert excinfo.value.idempotency_key is not None  # type: ignore[attr-defined]
     # The documented trio has to *read* rather than raise on exactly the
-    # failures it is most needed on: httpx's classes declare neither attribute.
+    # failures it is most needed on: httpx2's classes declare neither attribute.
     assert excinfo.value.request_id is None  # type: ignore[attr-defined]
     assert excinfo.value.retry_after is None  # type: ignore[attr-defined]
 
 
 async def test_an_async_transport_level_failure_carries_the_key(monkeypatch) -> None:
     monkeypatch.setenv(BASE_URL_ENV_VAR, f"http://127.0.0.1:{_closed_port()}")
-    async with AsyncComfy() as client:
-        with pytest.raises(httpx.ConnectError) as excinfo:
+    async with AsyncTurbine() as client:
+        with pytest.raises(httpx2.ConnectError) as excinfo:
             await client.submit(_wf(client))
     assert excinfo.value.idempotency_key is not None  # type: ignore[attr-defined]
     assert excinfo.value.request_id is None  # type: ignore[attr-defined]
@@ -222,8 +222,8 @@ async def test_an_async_transport_level_failure_carries_the_key(monkeypatch) -> 
 
 def test_a_caller_supplied_key_survives_a_transport_failure(monkeypatch) -> None:
     monkeypatch.setenv(BASE_URL_ENV_VAR, f"http://127.0.0.1:{_closed_port()}")
-    with Comfy() as client:
-        with pytest.raises(httpx.ConnectError) as excinfo:
+    with Turbine() as client:
+        with pytest.raises(httpx2.ConnectError) as excinfo:
             client.submit(_wf(client), idempotency_key="abc-transport")
     assert excinfo.value.idempotency_key == "abc-transport"  # type: ignore[attr-defined]
 
@@ -235,8 +235,8 @@ def test_run_surfaces_the_key_of_a_failed_submit_phase(server) -> None:
     # `run` mints no key of its own — it calls `submit`, so the stamp has to
     # reach the caller through it.
     server.state.job_error = (422, "invalid_workflow")
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.run(_wf(client))
     (sent,) = server.state.jobs_idempotency_keys
     assert sent is not None
@@ -245,8 +245,8 @@ def test_run_surfaces_the_key_of_a_failed_submit_phase(server) -> None:
 
 async def test_async_run_surfaces_the_key_of_a_failed_submit_phase(server) -> None:
     server.state.job_error = (422, "invalid_workflow")
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.run(_wf(client))
     (sent,) = server.state.jobs_idempotency_keys
     assert sent is not None
@@ -271,7 +271,7 @@ async def test_cancelling_an_in_flight_submit_still_yields_the_key(server) -> No
         seen.append(idempotency_key)
         raise asyncio.CancelledError
 
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         wf = _wf(client)
         client._low.post_jobs = _cancelled_post_jobs  # type: ignore[method-assign]
         with pytest.raises(asyncio.CancelledError) as excinfo:

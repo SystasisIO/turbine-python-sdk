@@ -7,14 +7,14 @@ plain dict value, never nested in a list (batch inputs).
 
 from __future__ import annotations
 
-from comfy_sdk._core import find_asset_handles, substitute_asset_handles
-from comfy_sdk.workflows import Workflow, WorkflowFactory
+from turbine_sdk._core import find_asset_handles, substitute_asset_handles
+from turbine_sdk.workflows import Workflow, WorkflowFactory
 
 
 class _FakeHandle:
-    """Stands in for an Asset handle (detected via `_is_comfy_asset`)."""
+    """Stands in for an Asset handle (detected via `_is_turbine_asset`)."""
 
-    _is_comfy_asset = True
+    _is_turbine_asset = True
 
 
 def test_set_input_sets_plain_value_and_creates_missing_node():

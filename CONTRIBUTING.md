@@ -1,12 +1,12 @@
-# Contributing to comfy-python-sdk
+# Contributing to turbine-python-sdk
 
 Thanks for contributing. This document covers local setup, the checks CI
-requires, and the one trap that bites new contributors: `comfy_low`'s models
+requires, and the one trap that bites new contributors: `turbine_low`'s models
 are generated, and hand-editing them is invisible to the linters but fails CI.
 
 ## Prerequisites
 
-- **Python 3.10+** — CI tests 3.10, 3.11, 3.12, and 3.13.
+- **Python 3.11+** — CI tests 3.11, 3.12, and 3.13.
 - **[uv](https://docs.astral.sh/uv/)** — recommended for local work; `uv.lock`
   is committed, so `uv run` gives you the same resolved dependency set as
   everyone else. Plain `pip` works too (see [Using pip instead](#using-pip-instead)).
@@ -14,8 +14,8 @@ are generated, and hand-editing them is invisible to the linters but fails CI.
 ## Setup
 
 ```bash
-git clone https://github.com/Comfy-Org/comfy-python-sdk
-cd comfy-python-sdk
+git clone https://github.com/SystasisIO/turbine-python-sdk
+cd turbine-python-sdk
 uv sync --extra dev
 ```
 
@@ -43,11 +43,11 @@ uv run --extra dev pytest -v             # tests
 A few things that will fail you that are easy to miss:
 
 - **Formatting is a gate, not a suggestion.** CI runs `ruff format --check`.
-- **`comfy_sdk` requires full annotations.** `disallow_untyped_defs` is on for
-  `comfy_sdk.*` only (it is the hand-written public surface and ships
-  `py.typed`). `comfy_low` wraps generated code, so it is exempt.
+- **`turbine_sdk` requires full annotations.** `disallow_untyped_defs` is on for
+  `turbine_sdk.*` only (it is the hand-written public surface and ships
+  `py.typed`). `turbine_low` wraps generated code, so it is exempt.
 - **Deprecation warnings are errors.** `filterwarnings` turns
-  `DeprecationWarning` and `PendingDeprecationWarning` into test failures —
+  `DeprecationWarning`, `PendingDeprecationWarning`, and HTTPX2 deprecations into test failures —
   they are the advance warning that a dependency bump is about to break the SDK.
 - **Markers and config are strict.** `--strict-markers --strict-config`, so a
   typo'd `@pytest.mark.*` or a bad ini key fails rather than being ignored.
@@ -60,9 +60,9 @@ CI runs two more jobs beyond the four above:
   scans for internal-only references. This is a public repo; the check is a
   permanent gate, not a one-time cleanup.
 
-## The codegen trap: `src/comfy_low/models/_generated.py`
+## The codegen trap: `src/turbine_low/models/_generated.py`
 
-`src/comfy_low/models/_generated.py` is **the only generated file in the repo**.
+`src/turbine_low/models/_generated.py` is **the only generated file in the repo**.
 It is produced by `datamodel-code-generator` from the vendored OpenAPI document
 at `spec/openapi.yaml`, and it is committed.
 
@@ -73,14 +73,15 @@ generator's output. What catches an edit is the separate **`codegen-drift`** CI
 job, which regenerates the file into a temp directory and diffs it byte-for-byte
 against the committed copy.
 
-So if you need to change a model, **change `spec/openapi.yaml` and regenerate**:
+Sync upstream contract changes through the one-way vendoring process in
+`spec/README.md`, then regenerate. Do not hand-edit the vendored specification:
 
 ```bash
 uv run --extra codegen bash scripts/gen_models.sh   # regenerate
 uv run --extra codegen python scripts/check_drift.py  # the exact check CI runs
 ```
 
-Then commit the regenerated `src/comfy_low/models/_generated.py` alongside your
+Then commit the regenerated `src/turbine_low/models/_generated.py` alongside your
 spec change.
 
 Notes:
@@ -119,7 +120,7 @@ python scripts/check_drift.py
 | Extra     | What it is for                                                                       |
 | --------- | ------------------------------------------------------------------------------------ |
 | `dev`     | ruff, mypy, pytest, pytest-asyncio, pytest-cov — everything the required checks need |
-| `codegen` | `datamodel-code-generator` + PyYAML, for regenerating `comfy_low` models             |
+| `codegen` | `datamodel-code-generator` + PyYAML, for regenerating `turbine_low` models             |
 | `pil`     | Pillow, so `Preview.to_pil()` can decode an in-progress preview frame                |
 
 ## Tests
@@ -133,7 +134,7 @@ uv run --extra dev pytest tests/test_jobs.py -v   # a single file
 `asyncio_mode = "auto"`, so `async def` tests need no `@pytest.mark.asyncio`.
 
 `tests/integration/` holds a live end-to-end suite against a real gateway. It is
-env-gated and skipped unless `COMFY_BASE_URL` and `COMFY_API_KEY` are set, so it
+env-gated and skipped unless `TURBINE_BASE_URL` and `TURBINE_API_KEY` are set, so it
 does not run in normal CI. If your change touches upload/dedup, submission,
 polling, SSE, or output download, running it against a real deployment is worth
 the effort — several past releases were verified that way.
@@ -146,10 +147,8 @@ the effort — several past releases were verified that way.
   the same form — they become the squashed commit message.
 - **No AI attribution trailers** in commit messages (no `Co-Authored-By:` for an
   assistant, no "Generated with ..." lines).
-- **CLA.** A first-time contributor is asked by the CLA Assistant bot to comment
-  the signing phrase on their PR. Only the PR author needs to sign.
-- **Review.** `.github/CODEOWNERS` requires an approving review from
-  `@Comfy-Org/comfy-cloud-team` or `@Comfy-Org/core-engine-team` on every PR.
+- **Review.** Changes require independent review before publication. Maintainers
+  must configure verified fork code owners separately; upstream teams are not owners.
 - **Update `CHANGELOG.md`.** Add a bullet under `## [Unreleased]` describing the
   user-visible change. Purely internal changes (CI, refactors with no API
   effect) do not need an entry.
@@ -158,22 +157,15 @@ the effort — several past releases were verified that way.
 
 ## Reporting bugs and requesting features
 
-Use the [issue templates](https://github.com/Comfy-Org/comfy-python-sdk/issues/new/choose).
+Use the [issue templates](https://github.com/SystasisIO/turbine-python-sdk/issues/new/choose).
 For a bug, the SDK version, the Python version, and a minimal reproducible
 snippet are what make it actionable.
 
 ## Releases
 
-Maintainers only. Releases are published to PyPI by
-[`.github/workflows/publish.yml`](.github/workflows/publish.yml) when a GitHub
-Release is published with a `vX.Y.Z` tag, using PyPI Trusted Publishing (OIDC) —
-no API token lives in this repo.
+Package-index publication is disabled. The manual `publish.yml` workflow only
+builds and validates wheel/sdist artifacts. Actual release requires a separate
+maintainer decision, package ownership and Trusted Publisher setup.
 
-Versioning is **tag-driven**: the tag is the single source of truth and is
-injected into `pyproject.toml` at build time, so the version committed there is
-a placeholder and **no version-bump commit is needed**. Before cutting a
-release, move the `## [Unreleased]` entries in `CHANGELOG.md` under the new
-version heading.
-
-Running the workflow manually (`workflow_dispatch`) is a dry run: it builds and
-runs `twine check` but never reaches the publish job.
+Runtime `__version__` comes from installed `turbine-sdk` metadata, not a second
+hardcoded version. Keep release metadata and the changelog consistent.

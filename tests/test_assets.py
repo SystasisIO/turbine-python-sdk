@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import io
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-from comfy_sdk import AsyncComfy, Comfy, DownloadUrl, HashMismatch, NotFound
+from turbine_sdk import AsyncTurbine, DownloadUrl, HashMismatch, NotFound, Turbine
 
 
 def test_dedup_fast_path_skips_upload(server, tmp_path) -> None:
@@ -16,7 +16,7 @@ def test_dedup_fast_path_skips_upload(server, tmp_path) -> None:
     p = tmp_path / "photo.png"
     p.write_bytes(data)
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_file(p)
         # Tell the server it already has these exact bytes (dedup hit).
         server.state.known_hashes.add(asset.hash)
@@ -36,7 +36,7 @@ def test_uploaded_asset_has_no_producing_job(server, tmp_path) -> None:
     p = tmp_path / "photo.png"
     p.write_bytes(b"plain-upload-bytes")
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_file(p)
         asset.commit()
         assert asset.job_id is None
@@ -46,10 +46,10 @@ def test_committed_asset_exposes_expiry(server, tmp_path) -> None:
     p = tmp_path / "photo.png"
     p.write_bytes(b"expiring-bytes")
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_file(p)
         asset.commit()
-        assert asset.expires_at == datetime(2026, 8, 9, 18, 0, tzinfo=timezone.utc)
+        assert asset.expires_at == datetime(2026, 8, 9, 18, 0, tzinfo=UTC)
 
 
 class _ReadRecorder(io.BytesIO):
@@ -71,7 +71,7 @@ def test_streaming_upload_does_not_buffer_whole_file(server, monkeypatch) -> Non
     payload = b"x" * (1024 * 1024)
     recorder = _ReadRecorder(payload)
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         # from_stream buffers to hash, so drive the low transport directly with a
         # recording file object to observe how the body is read during upload.
         low = client._low
@@ -97,7 +97,7 @@ def test_post_assets_sends_one_multipart_part_per_tag(server, tmp_path) -> None:
     p = tmp_path / "tagged.bin"
     p.write_bytes(payload)
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         with open(p, "rb") as fh:
             client._low.post_assets(
                 fh,
@@ -118,7 +118,7 @@ def test_hash_mismatch_surfaced_without_blind_retry(server, tmp_path) -> None:
     p = tmp_path / "photo.png"
     p.write_bytes(b"some-bytes-that-will-mismatch")
 
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_file(p)
         with pytest.raises(HashMismatch):
             asset.commit()
@@ -128,7 +128,7 @@ def test_hash_mismatch_surfaced_without_blind_retry(server, tmp_path) -> None:
 
 
 def test_delete_asset_by_id(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.assets.delete("asset_uuid_01")
         with pytest.raises(NotFound):
             client.assets.get("asset_uuid_01")
@@ -138,7 +138,7 @@ def test_delete_asset_by_id(server) -> None:
 
 def test_delete_asset_on_asset_instance(server) -> None:
     data = b"delete-me-bytes"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_bytes(data, filename="photo.png")
         asset.commit()
         asset_id = asset.id
@@ -152,7 +152,7 @@ def test_delete_asset_on_asset_instance(server) -> None:
 
 
 def test_delete_uncommitted_asset_raises(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_bytes(b"not-uploaded", filename="photo.png")
         with pytest.raises(RuntimeError, match="uncommitted"):
             asset.delete()
@@ -178,7 +178,7 @@ def test_get_download_url_commits_then_resolves_signed_url(server) -> None:
     # get_download_url on an uncommitted handle must upload first, then
     # resolve — the flow that feeds an uploaded image to a URL-taking model.
     server.state.redirect_content_to = _SIGNED_URL
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_bytes(b"router-input-bytes", filename="photo.png")
         download = asset.get_download_url()
 
@@ -186,11 +186,11 @@ def test_get_download_url_commits_then_resolves_signed_url(server) -> None:
     assert asset.id == "asset_uploaded_01"  # committed as a side effect
     assert server.state.upload_count == 1
     assert download.url == _SIGNED_URL
-    assert download.expires_at == datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
+    assert download.expires_at == datetime(2026, 7, 10, 19, 0, tzinfo=UTC)
 
 
 def test_get_download_url_self_hosted_returns_content_endpoint(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_bytes(b"router-input-bytes", filename="photo.png")
         download = asset.get_download_url()
 
@@ -200,10 +200,10 @@ def test_get_download_url_self_hosted_returns_content_endpoint(server) -> None:
 
 async def test_async_get_download_url_commits_then_resolves(server) -> None:
     server.state.redirect_content_to = _SIGNED_URL
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_bytes(b"router-input-bytes", filename="photo.png")
         download = await asset.get_download_url()
 
     assert asset.id == "asset_uploaded_01"
     assert download.url == _SIGNED_URL
-    assert download.expires_at == datetime(2026, 7, 10, 19, 0, tzinfo=timezone.utc)
+    assert download.expires_at == datetime(2026, 7, 10, 19, 0, tzinfo=UTC)

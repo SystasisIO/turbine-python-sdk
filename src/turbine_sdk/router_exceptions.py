@@ -3,7 +3,7 @@
 One class per ``error_type`` in the router's closed error set, so a caller
 branches on a class rather than on a string::
 
-    from comfy_sdk.router_exceptions import ContentPolicyViolation, RouterError
+    from turbine_sdk.router_exceptions import ContentPolicyViolation, RouterError
 
     try:
         ...                                    # a client.models call
@@ -24,8 +24,8 @@ hand-picked name cannot creep in.
 
 **Every class derives from :class:`RouterError`.** A caller who wants the broad
 catch writes ``except RouterError``; one who wants a single failure mode names
-it. ``RouterError`` in turn derives from :class:`~comfy_sdk.exceptions.ComfyError`,
-so ``except ComfyError`` still covers the whole SDK.
+it. ``RouterError`` in turn derives from :class:`~turbine_sdk.exceptions.TurbineError`,
+so ``except TurbineError`` still covers the whole SDK.
 
 **The set comes from the vendored contract, not from this file.**
 ``spec/router-openapi.yaml`` carries the closed bucket list as
@@ -54,10 +54,10 @@ catchable exception carrying its raw ``error_type`` -- treat one like
 exactly when something has already gone wrong.
 
 Three of these names -- ``Unauthorized``, ``Forbidden``, ``InsufficientCredits``
--- also exist in :mod:`comfy_sdk.exceptions`, which is where the workflow
+-- also exist in :mod:`turbine_sdk.exceptions`, which is where the workflow
 surface's error codes are mapped. **They are the same class object, defined
-here and re-exported there**, so ``comfy_sdk.exceptions.Unauthorized is
-comfy_sdk.router_exceptions.Unauthorized`` and either import catches whatever
+here and re-exported there**, so ``turbine_sdk.exceptions.Unauthorized is
+turbine_sdk.router_exceptions.Unauthorized`` and either import catches whatever
 the other one does. ``tests/test_exception_modules.py`` asserts that of every
 name the two modules share.
 
@@ -75,16 +75,16 @@ not on the other. ``except Unauthorized`` (from either module) is unchanged;
 buckets.
 
 This module is still deliberately *not* star-re-exported from the package root:
-lifting :class:`NotEnabled` there while ``comfy_sdk.InvalidInput`` stayed a name
+lifting :class:`NotEnabled` there while ``turbine_sdk.InvalidInput`` stayed a name
 that does not exist would leave a caller guessing which half of one hierarchy
 lives where. One import path for the whole set is the property worth keeping,
-and ``from comfy_sdk.router_exceptions import NotEnabled`` is it.
+and ``from turbine_sdk.router_exceptions import NotEnabled`` is it.
 :class:`RouterError` itself *is* lifted to the root, because it is the one name
 a caller writing a broad handler reaches for first -- and so are
 :class:`CancelRefused` and :class:`AlreadyCompleted`, which a caller handles at
 the ``cancel()`` call site rather than through this module. Those three are the
 whole of the package root's share; everything else is ``from
-comfy_sdk.router_exceptions import ...``.
+turbine_sdk.router_exceptions import ...``.
 
 The coarse bucket is not the whole story. A per-field model-validation failure
 carries a ``detail`` *array* whose entries keep the specific, provider-level
@@ -100,9 +100,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from comfy_low.errors import _location, clean_body_excerpt, clean_request_id, summarise_detail
+from turbine_low.errors import _location, clean_body_excerpt, clean_request_id, summarise_detail
 
-from ._errors import ComfyError
+from ._errors import TurbineError
 
 #: Response header carrying the coarse failure bucket. Set on every router error
 #: response, and on a per-field validation failure it is the only place the
@@ -118,8 +118,8 @@ REQUEST_ID_HEADER = "X-Comfy-Request-Id"
 #: contract documents it on the throttled buckets (:class:`RateLimited`,
 #: :class:`ConcurrencyLimitExceeded`) and on a ``deadline_exceeded`` ``504``.
 #: It is read here rather than dropped because
-#: :func:`comfy_sdk.retry.retry_after_of` is what
-#: :meth:`~comfy_sdk.retry.RetryPolicy.should_retry` keys both of its
+#: :func:`turbine_sdk.retry.retry_after_of` is what
+#: :meth:`~turbine_sdk.retry.RetryPolicy.should_retry` keys both of its
 #: default-on branches on -- the ``429`` and the collectable ``504``/``409``:
 #: a router error that arrived without this attribute would make those branches
 #: unreachable and turn the retry the default policy is built to make into a
@@ -183,14 +183,14 @@ class ValidationErrorDetail:
     def location(self) -> str:
         """``loc`` as a dotted path -- ``body.images.0`` -- for display.
 
-        The one renderer :func:`comfy_low.errors.summarise_detail` uses, shared
+        The one renderer :func:`turbine_low.errors.summarise_detail` uses, shared
         rather than restated so this property and the summary built from the
         same array can never disagree about what a field is called.
         """
         return _location(self.loc)
 
 
-class RouterError(ComfyError):
+class RouterError(TurbineError):
     """Base for every Comfy Router failure, and what an unknown bucket raises.
 
     ``error_type`` is the wire value; on this base class it is whatever the
@@ -220,7 +220,7 @@ class RouterError(ComfyError):
         #: machine-parsed -- branch on the exception class instead. Safe in the
         #: literal sense too on everything the builders in this module return:
         #: where the text came off the wire -- either spelling of Router's
-        #: ``detail`` -- it is run through ``comfy_low.errors.clean_body_excerpt``
+        #: ``detail`` -- it is run through ``turbine_low.errors.clean_body_excerpt``
         #: first, so it reaches a caller as printable characters on a single
         #: line, capped at 256, and cannot repaint a terminal or flood a log
         #: line; where the response described nothing, the value is this SDK's
@@ -232,7 +232,7 @@ class RouterError(ComfyError):
         self.request_id = request_id
         #: Seconds the server asked the caller to wait, from ``Retry-After``,
         #: or ``None`` when it named no pace. Named identically to
-        #: ``comfy_low.ApiError.retry_after`` on purpose: the retry policy
+        #: ``turbine_low.ApiError.retry_after`` on purpose: the retry policy
         #: reads it off either with one ``getattr``, so a router error and a
         #: protocol one are paced the same way.
         self.retry_after = retry_after
@@ -354,7 +354,7 @@ class ConcurrencyLimitExceeded(RouterError):
     finishes. On a ``409`` on the run route it means something more specific:
     another call is ALREADY in flight for the ``Idempotency-Key`` this request
     presented. Re-send the SAME key after ``retry_after`` seconds to collect
-    that call's result; :mod:`comfy_sdk.retry` does exactly that by default.
+    that call's result; :mod:`turbine_sdk.retry` does exactly that by default.
     """
 
     error_type = "concurrency_limit_exceeded"
@@ -395,7 +395,7 @@ class DeadlineExceeded(RouterError):
     That is the *contract's* advice, and unlike :class:`ServiceUnavailable` the
     SDK **does** follow it by default -- this is the one bucket a contract says
     the same key survives, so ``client.models.run`` makes the retry rather than
-    describing it. :func:`comfy_sdk.retry.is_collectable` is the gate and it
+    describing it. :func:`turbine_sdk.retry.is_collectable` is the gate and it
     keys on this bucket, never on the status alone: a ``504`` reaching the SDK
     without a bucket header is read as :class:`ProviderTimeout`, where a
     same-key retry is *not* blessed. It also requires the ``Retry-After``, which
@@ -404,9 +404,9 @@ class DeadlineExceeded(RouterError):
     ``deadline_exceeded`` ``504`` is raised to the caller like any other 5xx.
     The pace is honoured as given: ``error_from_response`` preserves the header
     on the exception, and
-    :meth:`~comfy_sdk.retry.Retrier.delay_before_retry` prefers a named pace
+    :meth:`~turbine_sdk.retry.Retrier.delay_before_retry` prefers a named pace
     over its own jittered backoff. ``RetryPolicy(retry_collectable=False)``
-    switches the behaviour off; ``Comfy(retry=NO_RETRY)`` switches off retrying
+    switches the behaviour off; ``Turbine(retry=NO_RETRY)`` switches off retrying
     entirely.
     """
 
@@ -424,11 +424,11 @@ class NotEnabled(RouterError):
     do not retry, and do not treat it as an outage.
 
     The one exception to "about the caller" is the queued submit
-    (:meth:`~comfy_sdk.models.Models.submit`), which also answers
+    (:meth:`~turbine_sdk.models.Models.submit`), which also answers
     ``not_enabled`` for a *model* whose partner answers a generation directly
     as bytes: that model cannot yet be queued, so it is the model and not the
     caller that is refused, nothing is queued or charged, and the synchronous
-    route (:meth:`~comfy_sdk.models.Models.run`) runs it instead. On a submit,
+    route (:meth:`~turbine_sdk.models.Models.run`) runs it instead. On a submit,
     read ``detail`` before concluding the account is not switched on.
     """
 
@@ -449,7 +449,7 @@ class ServiceUnavailable(RouterError):
     call is not going to work".
 
     On whether the SDK makes that retry for you: it does **not** by default, and
-    :mod:`comfy_sdk.retry` says why -- the bucket arrives on a ``503``, whose
+    :mod:`turbine_sdk.retry` says why -- the bucket arrives on a ``503``, whose
     effect on the ``Idempotency-Key`` the caller cannot observe from the status
     alone (the contract releases an undispatched refusal but keeps a cut-off
     dispatch holding the generation), and the default policy retries only
@@ -610,14 +610,14 @@ class CancelRefused(RouterError):
     catches because the response still named a bucket, a refusal shape this SDK
     does not recognise carries nothing that identifies it as a refusal at all --
     it is a ``409`` naming no bucket and no code, indistinguishable from any
-    other. Such a response stays an untyped ``ComfyError``, which is the honest
+    other. Such a response stays an untyped ``TurbineError``, which is the honest
     answer; typing it would be guessing. Teaching the SDK a new refusal is one
-    entry in :data:`comfy_low.errors._CODE_BY_CANCEL_STATUS` plus one subclass
+    entry in :data:`turbine_low.errors._CODE_BY_CANCEL_STATUS` plus one subclass
     here.
 
     A refusal is not necessarily a problem: cancelling is a request, not a
     guarantee, and the authoritative state is whatever
-    :meth:`comfy_sdk.model_requests.RequestHandle.status` says next.
+    :meth:`turbine_sdk.model_requests.RequestHandle.status` says next.
     """
 
     error_type = "cancel_refused"
@@ -629,7 +629,7 @@ class AlreadyCompleted(CancelRefused):
     The ``409`` answer to cancelling a request whose work is done -- body
     ``{"status": "ALREADY_COMPLETED"}``. Terminal and benign: there was
     nothing left to stop, the result is still collectable with
-    :meth:`comfy_sdk.model_requests.RequestHandle.get`, and re-sending the
+    :meth:`turbine_sdk.model_requests.RequestHandle.get`, and re-sending the
     cancel will be refused the same way.
 
     ``error_type`` is ``already_completed`` -- the snake_case of the body's
@@ -640,7 +640,7 @@ class AlreadyCompleted(CancelRefused):
     error_type = "already_completed"
 
 
-#: Cancel-refusal classes, keyed by the ``error_type`` :mod:`comfy_low.errors`
+#: Cancel-refusal classes, keyed by the ``error_type`` :mod:`turbine_low.errors`
 #: derives for them. Not folded into :data:`_BY_ERROR_TYPE`, which is the
 #: contract's closed set and is asserted against the vendored spec.
 CANCEL_REFUSALS: tuple[type[CancelRefused], ...] = (AlreadyCompleted,)
@@ -762,7 +762,7 @@ def error_from_response(
     lowered = _lowercase_headers(headers)
     # Bounded and filtered rather than merely stripped: the id is displayed
     # and pasted into support tickets, and this header is server-controlled.
-    # Shared with `comfy_low.transport` so both surfaces clean it identically.
+    # Shared with `turbine_low.transport` so both surfaces clean it identically.
     request_id = clean_request_id(lowered.get(REQUEST_ID_HEADER.lower()))
     error_type = _clean(lowered.get(ERROR_TYPE_HEADER.lower()))
     retry_after = _retry_after(lowered.get(RETRY_AFTER_HEADER.lower()))
@@ -777,7 +777,7 @@ def error_from_response(
             # bounded, single-line and printable whichever shape carried it.
             # This is where the string form used to reach `str(exc)` verbatim.
             # A whitespace-only `detail` now reads as absent and falls to the
-            # status fallback below, matching `comfy_low.error_from_envelope`.
+            # status fallback below, matching `turbine_low.error_from_envelope`.
             detail = clean_body_excerpt(raw_detail)
         elif isinstance(raw_detail, Sequence) and not isinstance(raw_detail, (str, bytes)):
             errors = tuple(
@@ -824,7 +824,7 @@ def error_from_completion(
     rather than as "no error possible".
 
     ``http_status`` is left unset on what this builds, deliberately: there was
-    no failing status. That also keeps :mod:`comfy_sdk.retry` out of it — a
+    no failing status. That also keeps :mod:`turbine_sdk.retry` out of it — a
     completion carrying an ``error_type`` is the server's final answer about a
     request that already ran, not a transport condition another attempt could
     survive.
@@ -870,7 +870,7 @@ def error_from_completion(
 
 def _lowercase_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
     """Header names are case-insensitive on the wire; normalise so a plain dict
-    works as well as an ``httpx.Headers``."""
+    works as well as an ``httpx2.Headers``."""
     if not headers:
         return {}
     return {str(name).lower(): value for name, value in headers.items()}
@@ -879,7 +879,7 @@ def _lowercase_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
 def _retry_after(value: Any) -> int | None:
     """``Retry-After`` as whole seconds, or ``None`` when it named no usable pace.
 
-    Delta-seconds only, matching ``comfy_low.transport._retry_after`` so one
+    Delta-seconds only, matching ``turbine_low.transport._retry_after`` so one
     header has one reading across the SDK: the HTTP-date form the RFC also
     permits is treated as absent rather than parsed here, since guessing at a
     clock skew is worse than falling back to the local backoff schedule. A
@@ -946,7 +946,7 @@ __all__ = [
     "CancelRefused",
     "Cancelled",
     "ClientDisconnected",
-    "ComfyError",
+    "TurbineError",
     "ConcurrencyLimitExceeded",
     "ContentPolicyViolation",
     "DeadlineExceeded",

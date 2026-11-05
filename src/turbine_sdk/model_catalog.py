@@ -5,8 +5,8 @@ anything: the catalog (``GET /v2/models``, ``listRouterModels``) and one model's
 input/output schema as a standalone OpenAPI document
 (``GET /v2/models/{provider}/{model}/openapi.json``,
 ``getRouterModelInputSchema``). Both go to the same host, with the same
-credential, as :meth:`comfy_sdk.models.Models.run`, and a failure raises the
-same typed :class:`~comfy_sdk.router_exceptions.RouterError` subclass, read off
+credential, as :meth:`turbine_sdk.models.Models.run`, and a failure raises the
+same typed :class:`~turbine_sdk.router_exceptions.RouterError` subclass, read off
 ``X-Comfy-Error-Type``.
 
 The shapes mirror the TypeScript SDK's ``comfy.models.list()`` /
@@ -31,24 +31,24 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mappin
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar, cast
 
-import httpx
+import httpx2
 
-from comfy_low.errors import ApiError, clean_request_id
-from comfy_low.transport import DISCOVERY_TIMEOUT, AsyncComfyLow, ComfyLow, parse_model_id
+from turbine_low.errors import ApiError, clean_request_id
+from turbine_low.transport import DISCOVERY_TIMEOUT, AsyncTurbineLow, TurbineLow, parse_model_id
 
-from .exceptions import ComfyError, translating
+from .exceptions import TurbineError, translating
 from .retry import Retrier, RetryPolicy
 from .router_exceptions import REQUEST_ID_HEADER, RouterError
 
-#: See :data:`comfy_sdk.models._CANDIDATE_FAILURES` — restated rather than
-#: imported because :mod:`comfy_sdk.models` imports this module.
-_CANDIDATE_FAILURES = (ApiError, RouterError, httpx.TransportError)
+#: See :data:`turbine_sdk.models._CANDIDATE_FAILURES` — restated rather than
+#: imported because :mod:`turbine_sdk.models` imports this module.
+_CANDIDATE_FAILURES = (ApiError, RouterError, httpx2.TransportError)
 
 _now = time.monotonic
 
 _T = TypeVar("_T")
 
-Timeout = float | httpx.Timeout | None
+Timeout = float | httpx2.Timeout | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ class ModelPage:
 
 @dataclass(frozen=True, slots=True)
 class SchemaResult:
-    """What :meth:`comfy_sdk.models.Models.schema` returns.
+    """What :meth:`turbine_sdk.models.Models.schema` returns.
 
     ``unchanged`` is the branch to take: ``False`` carries the full
     :attr:`document`; ``True`` means the ``etag`` passed in still matches, the
@@ -125,8 +125,8 @@ class SchemaResult:
     """``X-Comfy-Request-Id`` — the id to quote in a support request."""
 
 
-def _invalid(message: str, request_id: str | None) -> ComfyError:
-    return ComfyError(message, code="invalid_response", request_id=request_id)
+def _invalid(message: str, request_id: str | None) -> TurbineError:
+    return TurbineError(message, code="invalid_response", request_id=request_id)
 
 
 def _entry(raw: Any, request_id: str | None) -> CatalogModel:
@@ -228,7 +228,7 @@ def _schema_result(
 def _read_policy(policy: RetryPolicy) -> RetryPolicy:
     """``policy`` for a discovery read, which is a plain ``GET``.
 
-    :attr:`~comfy_sdk.retry.RetryPolicy.retry_possibly_in_flight` is off by
+    :attr:`~turbine_sdk.retry.RetryPolicy.retry_possibly_in_flight` is off by
     default because a run's resend may bill a second generation or be refused
     for its reused key. Neither applies to a read that carries no key and bills
     nothing, so a ``503`` or a read timeout here is retried whenever the policy
@@ -266,7 +266,7 @@ async def _acall(policy: RetryPolicy, send: Callable[[], Awaitable[_T]]) -> _T:
 
 
 class ModelList:
-    """The Router model catalog, returned by :meth:`comfy_sdk.models.Models.list`.
+    """The Router model catalog, returned by :meth:`turbine_sdk.models.Models.list`.
 
     Iterating it walks every page from ``cursor`` (the first page when
     omitted), yielding :class:`CatalogModel` entries and following
@@ -277,7 +277,7 @@ class ModelList:
 
     def __init__(
         self,
-        low: ComfyLow,
+        low: TurbineLow,
         retry: RetryPolicy,
         *,
         cursor: str | None,
@@ -315,14 +315,14 @@ class ModelList:
 
 
 class AsyncModelList:
-    """The Router model catalog on ``AsyncComfy`` — mirrors :class:`ModelList`.
+    """The Router model catalog on ``AsyncTurbine`` — mirrors :class:`ModelList`.
 
     ``async for`` walks every page; ``await catalog.page()`` fetches one.
     """
 
     def __init__(
         self,
-        low: AsyncComfyLow,
+        low: AsyncTurbineLow,
         retry: RetryPolicy,
         *,
         cursor: str | None,
@@ -361,15 +361,15 @@ class AsyncModelList:
 
 
 def get_schema(
-    low: ComfyLow, retry: RetryPolicy, model: str, *, etag: str | None, timeout: Timeout
+    low: TurbineLow, retry: RetryPolicy, model: str, *, etag: str | None, timeout: Timeout
 ) -> SchemaResult:
-    """One ``openapi.json`` read, sync — see :meth:`comfy_sdk.models.Models.schema`."""
+    """One ``openapi.json`` read, sync — see :meth:`turbine_sdk.models.Models.schema`."""
     body, headers = _call(retry, lambda: low.get_model_schema(model, etag=etag, timeout=timeout))
     return _schema_result(body, headers, etag)
 
 
 async def aget_schema(
-    low: AsyncComfyLow, retry: RetryPolicy, model: str, *, etag: str | None, timeout: Timeout
+    low: AsyncTurbineLow, retry: RetryPolicy, model: str, *, etag: str | None, timeout: Timeout
 ) -> SchemaResult:
     """Awaitable :func:`get_schema`."""
     body, headers = await _acall(

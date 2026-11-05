@@ -27,7 +27,7 @@ EXCLUDE_PATHS = {
     Path("scripts/check_public_repo_hygiene.py"),
 }
 EXCLUDE_DIR_PREFIXES = (
-    "src/comfy_low/models/",  # generated from the vendored spec
+    "src/turbine_low/models/",  # generated from the vendored spec
 )
 
 # --- Category 1: ticket-shaped identifiers (TEAM-1234) -------------------

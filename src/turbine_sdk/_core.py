@@ -66,7 +66,7 @@ def asset_reference(
 
 
 def _is_asset_handle(value: Any) -> bool:
-    return getattr(value, "_is_comfy_asset", False) is True
+    return getattr(value, "_is_turbine_asset", False) is True
 
 
 def find_asset_handles(graph: Any, _seen: set[int] | None = None) -> list[Any]:

@@ -1,10 +1,10 @@
-"""``comfy_sdk.exceptions`` and ``comfy_sdk.router_exceptions`` are one hierarchy.
+"""``turbine_sdk.exceptions`` and ``turbine_sdk.router_exceptions`` are one hierarchy.
 
 The two modules deliberately share names -- ``Unauthorized``, ``Forbidden``,
 ``InsufficientCredits`` mean the same thing on both the workflow surface and the
 Router one. What is *not* allowed is for a shared name to be two different
 classes, which is what it was: the class ``to_sdk_error`` raised for a Router
-refusal descended from ``ComfyError`` but not from ``RouterError``, so
+refusal descended from ``TurbineError`` but not from ``RouterError``, so
 
     try:
         client.models.subscribe(model, params)
@@ -27,19 +27,19 @@ from __future__ import annotations
 
 import pytest
 
-from comfy_low.errors import ApiError
-from comfy_sdk import AsyncComfy, Comfy
-from comfy_sdk import exceptions as sdk_exceptions
-from comfy_sdk import router_exceptions as router
-from comfy_sdk.retry import NO_RETRY
-from comfy_sdk.router_exceptions import (
+from turbine_low.errors import ApiError
+from turbine_sdk import AsyncTurbine, Turbine
+from turbine_sdk import exceptions as sdk_exceptions
+from turbine_sdk import router_exceptions as router
+from turbine_sdk.retry import NO_RETRY
+from turbine_sdk.router_exceptions import (
     AlreadyCompleted,
     CancelRefused,
-    ComfyError,
     InsufficientCredits,
     ModelNotFound,
     NotEnabled,
     RouterError,
+    TurbineError,
 )
 
 MODEL = "fal-ai/flux-pro"
@@ -84,7 +84,7 @@ def test_every_router_refusal_is_caught_by_the_router_base(server, status, bucke
     # and its refusal arrives in Router's own error shape (a bucket on the
     # header and in the body, no v2 `error.code` anywhere).
     server.state.queue_submit_error = (status, bucket)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(RouterError) as caught:
             client.models.submit(MODEL, ARGS)
     assert caught.value.error_type == bucket
@@ -99,7 +99,7 @@ async def test_every_async_router_refusal_is_caught_by_the_router_base(
     # `translating()` and therefore share every class it raises, so a parity
     # gap here would mean one of them had grown its own mapping.
     server.state.queue_submit_error = (status, bucket)
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(RouterError) as caught:
             await client.models.submit(MODEL, ARGS)
     assert caught.value.error_type == bucket
@@ -111,7 +111,7 @@ def test_every_router_refusal_on_the_run_route_is_caught_too(server, status, buc
     # path than `submit` does.
     server.state.model_run_router_error_shape = True
     server.state.model_run_error = (status, bucket)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(RouterError):
             client.models.run(MODEL, ARGS)
 
@@ -130,7 +130,7 @@ def test_the_named_class_still_catches_its_own_bucket(server, status, bucket, ex
     # the one failure mode still gets it, and gets it as the class the module
     # documents rather than as a base.
     server.state.queue_submit_error = (status, bucket)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(expected) as caught:
             client.models.submit(MODEL, ARGS)
     assert type(caught.value) is expected
@@ -140,7 +140,7 @@ def test_a_subscribe_that_refuses_for_no_credits_is_caught_by_the_router_base(se
     # The call the report reproduced against, spelled the way the report spells
     # it: an account with no credits, `subscribe`, and the broad handler.
     server.state.queue_submit_error = (402, "insufficient_credits")
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(RouterError) as caught:
             client.models.subscribe(MODEL, ARGS, timeout=30)
     assert type(caught.value) is InsufficientCredits
@@ -149,7 +149,7 @@ def test_a_subscribe_that_refuses_for_no_credits_is_caught_by_the_router_base(se
 
 async def test_an_async_subscribe_that_refuses_for_no_credits_is_caught_too(server) -> None:
     server.state.queue_submit_error = (402, "insufficient_credits")
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(RouterError):
             await client.models.subscribe(MODEL, ARGS, timeout=30)
 
@@ -158,10 +158,10 @@ def test_either_import_path_catches_a_refusal(server) -> None:
     # The whole point of the merge: the module a caller happened to import
     # from cannot decide whether their handler fires.
     server.state.queue_submit_error = (402, "insufficient_credits")
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(sdk_exceptions.InsufficientCredits):
             client.models.submit(MODEL, ARGS)
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(router.InsufficientCredits):
             client.models.submit(MODEL, ARGS)
 
@@ -213,7 +213,7 @@ def test_the_shared_buckets_descend_from_the_router_base() -> None:
     for name in ("Unauthorized", "Forbidden", "InsufficientCredits"):
         cls = getattr(sdk_exceptions, name)
         assert issubclass(cls, RouterError), name
-        assert issubclass(cls, ComfyError), name
+        assert issubclass(cls, TurbineError), name
 
 
 # -- a cancel the server declines --------------------------------------------
@@ -224,7 +224,7 @@ def test_a_cancel_of_a_finished_request_raises_a_named_exception(server) -> None
     # used to arrive as an untyped error whose only distinguishing feature was
     # the text of the body. Nothing here matches on that text.
     server.state.queue_cancel_refusal = (409, {"status": "ALREADY_COMPLETED"})
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         handle = client.models.submit(MODEL, ARGS)
         with pytest.raises(AlreadyCompleted) as caught:
             handle.cancel()
@@ -233,12 +233,12 @@ def test_a_cancel_of_a_finished_request_raises_a_named_exception(server) -> None
     assert exc.error_type == "already_completed"
     assert isinstance(exc, CancelRefused)
     assert isinstance(exc, RouterError)
-    assert isinstance(exc, ComfyError)
+    assert isinstance(exc, TurbineError)
 
 
 async def test_an_async_cancel_of_a_finished_request_raises_the_same_class(server) -> None:
     server.state.queue_cancel_refusal = (409, {"status": "ALREADY_COMPLETED"})
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         handle = await client.models.submit(MODEL, ARGS)
         with pytest.raises(AlreadyCompleted):
             await handle.cancel()
@@ -249,7 +249,7 @@ def test_the_refusal_status_value_is_matched_case_insensitively(server) -> None:
     # deployment that spells it back in another one must not fall through to an
     # untyped 409.
     server.state.queue_cancel_refusal = (409, {"status": "already_completed"})
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         handle = client.models.submit(MODEL, ARGS)
         with pytest.raises(AlreadyCompleted):
             handle.cancel()
@@ -260,14 +260,14 @@ def test_a_409_that_states_no_status_is_not_typed_as_a_cancel_refusal(server) ->
     # and a 409 that names neither a bucket nor a known refusal has nothing
     # this SDK can honestly call it.
     server.state.queue_cancel_refusal = (409, {"detail": "nope"})
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         handle = client.models.submit(MODEL, ARGS)
-        with pytest.raises(ComfyError) as caught:
+        with pytest.raises(TurbineError) as caught:
             handle.cancel()
-    # Exactly `ComfyError`, not merely "not a `CancelRefused`": a `409` that
+    # Exactly `TurbineError`, not merely "not a `CancelRefused`": a `409` that
     # named no bucket is not a Router verdict either, so `RouterError` would
     # pass the weaker assertion while being the wrong answer.
-    assert type(caught.value) is ComfyError
+    assert type(caught.value) is TurbineError
 
 
 def test_an_unrelated_409_body_status_on_another_route_is_left_alone(server) -> None:
@@ -275,7 +275,7 @@ def test_an_unrelated_409_body_status_on_another_route_is_left_alone(server) -> 
     # table: the refusal reading is consulted only after both code sources
     # come up empty.
     server.state.queue_submit_error = (409, "concurrency_limit_exceeded")
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(router.ConcurrencyLimitExceeded):
             client.models.submit(MODEL, ARGS)
 

@@ -20,7 +20,7 @@ in ``spec/openapi.yaml`` makes its shared ``IdempotencyKey`` parameter
 *single-use, reject-on-duplicate, with no response replay*: the first request to
 present a key is processed and any later one presenting it is rejected ``422``
 ``idempotency_key_reuse`` rather than re-run or replayed (see
-:class:`~comfy_sdk.exceptions.IdempotencyKeyReuse`). That is the JOBS surface's
+:class:`~turbine_sdk.exceptions.IdempotencyKeyReuse`). That is the JOBS surface's
 rule. The router run route records-and-replays instead: a repeated key is
 answered from the record, collected while still running (the
 ``concurrency_limit_exceeded`` ``409``), or refused ``409`` ``invalid_input``
@@ -121,7 +121,7 @@ fact about the deployment, not about the bucket, and a policy that claimed
 otherwise would be guessing. Set it for a deployment documented to replay a
 claimed key, not to reach a single bucket.
 
-Catching :class:`~comfy_sdk.router_exceptions.ServiceUnavailable` and retrying
+Catching :class:`~turbine_sdk.router_exceptions.ServiceUnavailable` and retrying
 by hand is *not* the same thing, and the difference is billable: ``models.run()``
 mints a **fresh** ``Idempotency-Key`` per call, so a bare ``run(...)`` again
 after a ``503`` presents a new key for a request the server may already be
@@ -131,7 +131,7 @@ hand-written retry is only safe when it passes the *same* explicit
 to replay a repeated key rather than reject it::
 
     import uuid
-    from comfy_sdk.router_exceptions import ServiceUnavailable
+    from turbine_sdk.router_exceptions import ServiceUnavailable
 
     key = str(uuid.uuid4())
     try:
@@ -168,22 +168,22 @@ host has no business pinning a caller (a whole thread, on the sync client) for
 longer than that. ``collect_max_elapsed`` is twenty minutes and governs class 3
 alone, because it is the one class whose budget has to outlast a *server-side*
 bound: a ``deadline_exceeded`` ``504`` arrives at Comfy's own deadline, the same
-ten minutes as :data:`~comfy_low.transport.MODEL_RUN_TIMEOUT`, so a budget of one
+ten minutes as :data:`~turbine_low.transport.MODEL_RUN_TIMEOUT`, so a budget of one
 deadline window is already spent when the ``504`` lands and the collect attempt
 it exists for never starts. Two windows is one to reach the ``504`` and one to
 collect what it left running — and nothing else pays for it. Both are measured
 from the same origin, the construction of the :class:`Retrier`; which one applies
 is decided per failure, by :func:`is_collectable`.
 
-Retry is on by default. ``Comfy(retry=NO_RETRY)`` turns it off; any other
+Retry is on by default. ``Turbine(retry=NO_RETRY)`` turns it off; any other
 policy is a :class:`RetryPolicy` you construct::
 
-    from comfy_sdk import Comfy, NO_RETRY, RetryPolicy
+    from turbine_sdk import Turbine, NO_RETRY, RetryPolicy
 
-    Comfy(retry=NO_RETRY)                              # exactly one attempt
-    Comfy(retry=RetryPolicy(max_elapsed=300.0))        # fast classes: 5 minutes
-    Comfy(retry=RetryPolicy(collect_max_elapsed=60.0)) # bound the collect loop
-    Comfy(retry=RetryPolicy(retry_collectable=False))  # no 504/409 collect loop
+    Turbine(retry=NO_RETRY)                              # exactly one attempt
+    Turbine(retry=RetryPolicy(max_elapsed=300.0))        # fast classes: 5 minutes
+    Turbine(retry=RetryPolicy(collect_max_elapsed=60.0)) # bound the collect loop
+    Turbine(retry=RetryPolicy(retry_collectable=False))  # no 504/409 collect loop
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import httpx
+import httpx2
 
 #: Transport failures where the request was never delivered, so the server
 #: cannot be working on it and cannot have claimed the ``Idempotency-Key``:
@@ -204,10 +204,10 @@ import httpx
 #: (``ConnectError`` is a ``NetworkError``, ``ConnectTimeout`` a
 #: ``TimeoutException``).
 _NEVER_DELIVERED: tuple[type[BaseException], ...] = (
-    httpx.ConnectError,
-    httpx.ConnectTimeout,
-    httpx.PoolTimeout,
-    httpx.ProxyError,
+    httpx2.ConnectError,
+    httpx2.ConnectTimeout,
+    httpx2.PoolTimeout,
+    httpx2.ProxyError,
 )
 
 #: Transport failures that leave the request's fate unknown — it may have been
@@ -216,9 +216,9 @@ _NEVER_DELIVERED: tuple[type[BaseException], ...] = (
 #: with no answer, which is precisely the case where the server is most likely
 #: still generating.
 _POSSIBLY_IN_FLIGHT: tuple[type[BaseException], ...] = (
-    httpx.TimeoutException,
-    httpx.NetworkError,
-    httpx.RemoteProtocolError,
+    httpx2.TimeoutException,
+    httpx2.NetworkError,
+    httpx2.RemoteProtocolError,
 )
 
 #: The one 4xx another attempt can change on its own, and only when it carries
@@ -333,7 +333,7 @@ def retry_after_of(exc: BaseException) -> float | None:
     Read off whatever exception carries it, by attribute rather than by type:
     the transport parses ``Retry-After`` into ``ApiError.retry_after`` for any
     status, and
-    :func:`comfy_sdk.router_exceptions.error_from_response` puts the same header
+    :func:`turbine_sdk.router_exceptions.error_from_response` puts the same header
     on ``RouterError.retry_after`` under the same name — so the throttled router
     buckets reach the ``429`` branch below rather than falling out of it for
     want of a pace. A value that is not a usable number of seconds is treated as
@@ -355,7 +355,7 @@ def error_bucket_of(exc: BaseException) -> str | None:
     :func:`retry_after_of` is: one failure reaches this module modelled by two
     different layers. A typed router error carries the wire ``error_type``
     (``RouterError.error_type``), while ``POST /v2/models/{provider}/{model}``
-    today raises the protocol :class:`~comfy_low.errors.ApiError`, whose
+    today raises the protocol :class:`~turbine_low.errors.ApiError`, whose
     envelope names the same thing ``code``. Reading only ``error_type`` would
     make every bucket-keyed
     rule below unreachable on the route those rules were written for — a retry
@@ -485,7 +485,7 @@ class RetryPolicy:
     #: It is separate, and twenty minutes, because the collect loop is the one
     #: class whose budget has to outlast a server-side bound. A
     #: ``deadline_exceeded`` ``504`` arrives *at* Comfy's own deadline — the same
-    #: ten minutes as :data:`~comfy_low.transport.MODEL_RUN_TIMEOUT` — so a
+    #: ten minutes as :data:`~turbine_low.transport.MODEL_RUN_TIMEOUT` — so a
     #: budget of one deadline window is already spent by the time the ``504``
     #: lands and the collect attempt it was sized for never starts. Two windows
     #: is one to reach the ``504`` and one to collect what it left running. The
@@ -611,7 +611,7 @@ class RetryPolicy:
 DEFAULT_RETRY = RetryPolicy()
 
 #: Retrying turned off: one logical call is exactly one attempt. Pass it as
-#: ``Comfy(retry=NO_RETRY)``. The ``Idempotency-Key`` is still sent — it is not
+#: ``Turbine(retry=NO_RETRY)``. The ``Idempotency-Key`` is still sent — it is not
 #: part of the retry policy, and a caller who retries by hand needs it.
 NO_RETRY = RetryPolicy(max_elapsed=0.0, collect_max_elapsed=0.0)
 

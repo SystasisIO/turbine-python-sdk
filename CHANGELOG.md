@@ -10,6 +10,12 @@ the fuller account of each version, including verification notes.
 
 ## [Unreleased]
 
+- Adapt the fork as `turbine-sdk` (`Turbine` / `AsyncTurbine`), Python 3.11+,
+  HTTPX2, explicit Turbine configuration and optional caller-owned HTTP clients.
+- Add native node discovery and prepared-prompt estimates with shared Pydantic schemas.
+- Preserve Comfy API v2 workflow execution and disable inherited package publication.
+
+
 ### Added
 
 - `ResultExpired` in `comfy_sdk.router_exceptions`, for the Router bucket `result_expired`

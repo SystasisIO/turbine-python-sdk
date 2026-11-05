@@ -10,12 +10,12 @@ Read the two traps first. Both of them pass local review and fail CI.
 
 ## Trap 1 — do not hand-edit the generated models
 
-`src/comfy_low/models/_generated.py` is **emitted by
+`src/turbine_low/models/_generated.py` is **emitted by
 [`scripts/gen_models.sh`](scripts/gen_models.sh) from
 [`spec/openapi.yaml`](spec/openapi.yaml)**. It is committed to the tree, so it
 looks like ordinary source, and nothing local will stop you editing it:
 
-- ruff skips it — `extend-exclude = ["src/comfy_low/models/_generated.py"]`
+- ruff skips it — `extend-exclude = ["src/turbine_low/models/_generated.py"]`
 - ruff format skips it for the same reason
 - mypy lists it in `exclude`
 
@@ -32,25 +32,24 @@ spec to make drift pass is the wrong fix in the other direction.
 
 | Path | Status |
 |---|---|
-| `src/comfy_low/models/_generated.py` | **Generated.** Never hand-edit. |
+| `src/turbine_low/models/_generated.py` | **Generated.** Never hand-edit. |
 | `spec/openapi.yaml`, `spec/router-openapi.yaml`, `spec/VERSION` | **Vendored**, synced one-way. Never hand-edit. |
-| `src/comfy_low/models/__init__.py` | Hand-written. Re-exports names from `_generated.py`; if a schema is added or renamed, update the import list and `__all__` here yourself — codegen does not touch this file. |
-| everything else under `src/comfy_low/` | Hand-written (transport, SSE decoder, errors, multipart). |
-| everything under `src/comfy_sdk/` | Hand-written. This is the public SDK surface. |
+| `src/turbine_low/models/__init__.py` | Hand-written. Re-exports names from `_generated.py`; if a schema is added or renamed, update the import list and `__all__` here yourself — codegen does not touch this file. |
+| everything else under `src/turbine_low/` | Hand-written (transport, SSE decoder, errors, multipart). |
+| everything under `src/turbine_sdk/` | Hand-written. This is the public SDK surface. |
 
 ### Regenerate
 
 ```bash
-uv run --extra codegen bash scripts/gen_models.sh   # rewrites src/comfy_low/models/_generated.py
+uv run --extra codegen bash scripts/gen_models.sh   # rewrites src/turbine_low/models/_generated.py
 uv run --extra codegen python scripts/check_drift.py  # the exact check CI runs
 ```
 
-`check_drift.py` runs two checks, not one: the byte-for-byte model comparison
-above, and the Router error-type comparison described under "Other things that
-are not obvious" below. Both run on every invocation, so a failure in one does
-not hide the other.
+`check_drift.py` verifies generated model bytes, Router error types/meaning
+digests, and Router route/host/media contracts. All checks run on each invocation;
+a failure in one does not hide the others.
 
-Then commit `src/comfy_low/models/_generated.py`.
+Then commit `src/turbine_low/models/_generated.py`.
 
 Two things that bite here:
 
@@ -90,9 +89,9 @@ Notes on the invocations:
 - `mypy src` deliberately excludes `tests/`. Do not "fix" a PR by widening it.
 - `ruff format --check` only reports. Use `ruff format .` to actually apply.
 
-The `test` job runs on the full matrix `3.10`, `3.11`, `3.12`, `3.13`. The
-floor is real: `requires-python = ">=3.10"`, and ruff/mypy are both configured
-for `py310`. Anything newer than 3.10 syntax breaks a quarter of the matrix.
+The `test` job runs on the full matrix `3.11`, `3.12`, `3.13`. The
+floor is real: `requires-python = ">=3.11"`, and ruff/mypy are both configured
+for `py311`. Anything newer than 3.11 syntax breaks the oldest supported interpreter.
 
 ---
 
@@ -102,7 +101,7 @@ for `py310`. Anything newer than 3.10 syntax breaks a quarter of the matrix.
 
 This repo is public. [`scripts/check_public_repo_hygiene.py`](scripts/check_public_repo_hygiene.py)
 scans every git-tracked file (except its own source and
-`src/comfy_low/models/`) and fails on three categories:
+`src/turbine_low/models/`) and fails on three categories:
 
 1. **Ticket-shaped identifiers** — anything matching `[A-Z]{2,6}-\d{2,6}`.
    Common tech acronyms are handled by an explicit allowlist in the script.
@@ -141,7 +140,7 @@ to ship means adding it there, or it silently will not be packaged.
   generated from the Router spec, but `scripts/check_drift.py` (and
   `tests/test_router_spec_contract.py`) compare its
   `RouterErrorType.x-comfy-error-types` list against
-  `comfy_sdk.router_exceptions.ROUTER_ERROR_TYPES` — same values, same order,
+  `turbine_sdk.router_exceptions.ROUTER_ERROR_TYPES` — same values, same order,
   so an addition, a removal *and* a reorder each fail it. A sync therefore also
   needs the matching edit to the class table: one `RouterError` subclass per new
   value (PascalCase of the wire value, that entry's `meaning` as its docstring),
@@ -158,33 +157,33 @@ to ship means adding it there, or it silently will not be packaged.
   by design. `spec/README.md` has the full reconcile procedure.
 - **Adding an operation to the contract is a four-file change.**
   `tests/test_spec_coverage.py` asserts that every non-internal `operationId`
-  in `spec/openapi.yaml` appears in `comfy_low.OPERATION_IDS`, that
-  `OPERATION_METHODS` covers exactly that set, and that both `ComfyLow` **and**
-  `AsyncComfyLow` expose the mapped method. A spec sync therefore needs:
+  in `spec/openapi.yaml` appears in `turbine_low.OPERATION_IDS`, that
+  `OPERATION_METHODS` covers exactly that set, and that both `TurbineLow` **and**
+  `AsyncTurbineLow` expose the mapped method. A spec sync therefore needs:
   regenerated models, updated `OPERATION_IDS` / `OPERATION_METHODS` in
-  `src/comfy_low/__init__.py`, and a method on each transport.
-- **Every public `def` in `comfy_sdk` must be annotated.** A mypy override sets
-  `disallow_untyped_defs = true` for `comfy_sdk.*` only; the rest of the tree
+  `src/turbine_low/__init__.py`, and a method on each transport.
+- **Every public `def` in `turbine_sdk` must be annotated.** A mypy override sets
+  `disallow_untyped_defs = true` for `turbine_sdk.*` only; the rest of the tree
   is looser. Both packages ship `py.typed`.
 - **Deprecation warnings are errors.** `filterwarnings` promotes
-  `DeprecationWarning` and `PendingDeprecationWarning` to failures, so a
+  `DeprecationWarning`, `PendingDeprecationWarning` and HTTPX2 deprecations to failures, so a
   dependency bump can turn the suite red without any source change. That is
   intentional — it is the advance warning before a breaking upgrade.
 - **The test suite has no network dependency.** `tests/conftest.py` runs a
   stdlib-only stub of the API in a background thread and points the SDK at it
-  via `COMFY_BASE_URL`. Do not add mocks of `httpx`; drive `server.state`
+  via `TURBINE_BASE_URL`. Do not add mocks of `httpx2`; drive `server.state`
   instead.
 - **`tests/integration/test_gateway_e2e.py` is skipped** unless both
-  `COMFY_BASE_URL` and `COMFY_API_KEY` are set. It is collected by default and
+  `TURBINE_BASE_URL` and `TURBINE_API_KEY` are set. It is collected by default and
   skips silently, so a green local run does not mean it passed.
 - **`pytest` runs in `asyncio_mode = "auto"`** with `--strict-markers` and
   `--strict-config`. An unregistered marker is an error, not a warning.
-- **Do not hardcode a version.** `comfy_sdk.__version__` is resolved from
+- **Do not hardcode a version.** `turbine_sdk.__version__` is resolved from
   installed distribution metadata; the `version` in `pyproject.toml` is a
-  placeholder that the publish workflow overwrites with the release tag.
+  placeholder; package-index publication is disabled pending maintainer setup.
   `tests/test_version.py` guards this.
-- **Every file needs an approving review from a code owner**
-  (`.github/CODEOWNERS` covers `*`), so an agent cannot self-merge anything.
+- **Changes require review before publication.** The fork must configure verified
+  code owners separately; agents do not self-merge to the default branch.
 
 ## Commit and PR conventions
 
@@ -192,6 +191,6 @@ to ship means adding it there, or it silently will not be packaged.
   a breaking change) — the git history is uniform on this.
 - **No AI attribution trailers.** Do not add `Co-Authored-By` lines or
   "generated with" footers to commits in this repo.
-- CodeRabbit reviews every non-draft PR and is configured
+- If enabled by maintainers, CodeRabbit reviews non-draft PRs and is configured
   (`.coderabbit.yaml`) *not* to repeat ruff/mypy findings — so a CodeRabbit
   comment is about behavior, not style, and is worth reading closely.

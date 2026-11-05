@@ -1,0 +1,25 @@
+{
+  "Example": {
+    "input": {
+      "required": {
+        "text": ["STRING", {"default": "hello", "multiline": true}],
+        "mode": [["fast", "quality", "balanced"], {"default": "balanced"}],
+        "seed": ["INT", {"default": 42, "min": 0, "max": 18446744073709551615}]
+      },
+      "optional": null,
+      "hidden": {"prompt": "PROMPT"},
+      "package_group": {"optional": ["custom", {"hint": null}]}
+    },
+    "input_order": {"required": ["text", "mode", "seed"]},
+    "output": ["IMAGE"],
+    "output_name": ["image"],
+    "output_is_list": [false],
+    "name": "Example",
+    "display_name": null,
+    "description": "Native example with dynamic widget descriptors",
+    "category": "examples",
+    "output_node": false,
+    "package_metadata": {"tags": ["native", "custom"], "nested": {"optional": null}}
+  },
+  "Minimal": {"output": []}
+}

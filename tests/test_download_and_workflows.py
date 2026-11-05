@@ -6,11 +6,11 @@ import io
 
 import pytest
 
-from comfy_sdk import Comfy
-from comfy_sdk._core import find_asset_handles, substitute_asset_handles
+from turbine_sdk import Turbine
+from turbine_sdk._core import find_asset_handles, substitute_asset_handles
 
 
-def _wf(client: Comfy):
+def _wf(client: Turbine):
     return client.workflows.from_json({"3": {"class_type": "KSampler", "inputs": {}}})
 
 
@@ -25,7 +25,7 @@ class _ShortWriter(io.BytesIO):
 
 def test_range_download_returns_partial(server) -> None:
     server.state.content_bytes = b"0123456789abcdef"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         out = job.get_outputs("13")[0]
         head = out.to_bytes(range=(0, 4))
@@ -37,7 +37,7 @@ def test_range_download_to_file_writes_only_the_requested_slice(server, tmp_path
     # disk through a separate code path (chunked writes, not a bytearray) and
     # had no coverage at all.
     server.state.content_bytes = b"0123456789abcdef"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         out = job.get_outputs("13")[0]
         dest = out.to_file(tmp_path / "partial.bin", range=(4, 9))
@@ -45,7 +45,7 @@ def test_range_download_to_file_writes_only_the_requested_slice(server, tmp_path
 
 
 def test_full_download(server, tmp_path) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         out = job.get_outputs("13")[0]
         dest = out.to_file(tmp_path / "out.bin")
@@ -54,7 +54,7 @@ def test_full_download(server, tmp_path) -> None:
 
 def test_to_stream_retries_partial_writes(server) -> None:
     stream = _ShortWriter(limit=3)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         written = job.get_outputs("13")[0].to_stream(stream)
     assert written == len(server.state.content_bytes)
@@ -63,7 +63,7 @@ def test_to_stream_retries_partial_writes(server) -> None:
 
 def test_to_stream_rejects_zero_byte_writes(server) -> None:
     stream = _ShortWriter(limit=0)
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.run(_wf(client))
         with pytest.raises(OSError, match="made no progress"):
             job.get_outputs("13")[0].to_stream(stream)
@@ -72,7 +72,7 @@ def test_to_stream_rejects_zero_byte_writes(server) -> None:
 def test_core_asset_substitution(server, tmp_path) -> None:
     p = tmp_path / "photo.png"
     p.write_bytes(b"pixels")
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         server.state.known_hashes  # dedup not seeded -> will upload
         asset = client.assets.from_file(p)
         wf = client.workflows.from_json(

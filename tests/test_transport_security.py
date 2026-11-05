@@ -3,7 +3,7 @@
 
 ``job.urls.self`` / ``job.urls.events`` / ``job.urls.cancel`` are server-returned
 absolute URLs that ``Job.refresh()`` / ``events()`` / ``cancel()`` hand straight
-to the transport (see ``comfy_sdk/jobs.py``). Before this fix, ``_Prepared``
+to the transport (see ``turbine_sdk/jobs.py``). Before this fix, ``_Prepared``
 attached ``Authorization: Bearer <key>`` to *any* absolute URL with no origin
 check — a malicious or misconfigured server could point a job's follow-up link
 at an attacker-controlled host and have the client hand it the credential.
@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import pytest
 
-from comfy_low.transport import ComfyLow
+from turbine_low.transport import TurbineLow
 
 
 def test_absolute_url_same_origin_still_gets_bearer_token(server) -> None:
     server.state.require_auth = True
-    with ComfyLow(server.base_url, api_key="ck_test") as low:
+    with TurbineLow(server.base_url, api_key="ck_test", router_base_url=server.base_url) as low:
         # A same-origin absolute URL (exactly the shape job.urls.self takes).
         low.get_job(f"{server.base_url}/api/v2/jobs/whatever")
     assert server.state.last_auth_header == "Bearer ck_test"
@@ -37,13 +37,17 @@ def test_absolute_url_cross_origin_does_not_get_bearer_token(server, second_serv
     # The client is configured against `server` with a real key. A job's
     # `urls.self` pointing at `second_server` — a different origin — must NOT
     # receive that key, even though it's a plain absolute URL our own transport
-    # is asked to fetch (not an httpx redirect, where httpx already strips auth
+    # is asked to fetch (not an httpx2 redirect, where httpx2 already strips auth
     # on its own).
-    with ComfyLow(server.base_url, api_key="ck_super_secret") as low:
+    with TurbineLow(
+        server.base_url, api_key="ck_super_secret", router_base_url=server.base_url
+    ) as low:
         low.get_job(f"{second_server.base_url}/api/v2/jobs/whatever")
     assert second_server.state.last_auth_header == ""
     # And the same client still authenticates correctly against its own origin.
-    with ComfyLow(server.base_url, api_key="ck_super_secret") as low:
+    with TurbineLow(
+        server.base_url, api_key="ck_super_secret", router_base_url=server.base_url
+    ) as low:
         low.get_job(f"{server.base_url}/api/v2/jobs/whatever")
     assert server.state.last_auth_header == "Bearer ck_super_secret"
 
@@ -51,7 +55,7 @@ def test_absolute_url_cross_origin_does_not_get_bearer_token(server, second_serv
 def test_relative_path_resolved_against_base_url_still_gets_token(server) -> None:
     # A plain job id (not a URL) resolves under base_url — unaffected by the fix.
     server.state.require_auth = True
-    with ComfyLow(server.base_url, api_key="ck_test") as low:
+    with TurbineLow(server.base_url, api_key="ck_test", router_base_url=server.base_url) as low:
         low.get_job("whatever")
     assert server.state.last_auth_header == "Bearer ck_test"
 
@@ -68,7 +72,7 @@ def test_the_router_origin_gets_the_token_even_when_it_is_not_base_url(
     # the headline model API would be unauthenticated against a correctly
     # configured client.
     second_server.state.require_auth = True
-    with ComfyLow(
+    with TurbineLow(
         server.base_url, api_key="ck_test", router_base_url=second_server.base_url
     ) as low:
         low.post_model_run(MODEL, {"prompt": "a cat"})
@@ -82,7 +86,7 @@ def test_a_third_origin_still_gets_no_token_once_the_router_is_trusted(
     # The regression this pairs with: broadening the origin check from one
     # configured target to two must not broaden it to "any absolute URL".
     # `second_server` is neither `base_url` nor `router_base_url` here.
-    with ComfyLow(
+    with TurbineLow(
         server.base_url, api_key="ck_super_secret", router_base_url="https://router.example"
     ) as low:
         low.get_job(f"{second_server.base_url}/api/v2/jobs/whatever")
@@ -92,7 +96,7 @@ def test_a_third_origin_still_gets_no_token_once_the_router_is_trusted(
 def test_the_run_url_does_not_pick_up_the_v2_prefix(server) -> None:
     # `_Prepared.url()` prepends `/api/v2` to a relative path; the model-run URL
     # is built absolute against `router_base_url` precisely so it does not.
-    with ComfyLow(server.base_url, api_key="ck_test", router_base_url=server.base_url) as low:
+    with TurbineLow(server.base_url, api_key="ck_test", router_base_url=server.base_url) as low:
         low.post_model_run(MODEL, {"prompt": "a cat"})
     assert server.state.last_model_run_path == "/v2/models/acme/flux-dev"
 
@@ -103,4 +107,4 @@ def test_a_non_http_router_base_url_is_refused_at_construction(bad: str) -> None
     # `http` — would fall through to the `base_url + /api/v2 + ...` branch and
     # send an authenticated run at a mangled URL on the wrong surface.
     with pytest.raises(ValueError, match="router_base_url"):
-        ComfyLow("https://cloud.comfy.org", api_key="ck_test", router_base_url=bad)
+        TurbineLow("https://cloud.comfy.org", api_key="ck_test", router_base_url=bad)

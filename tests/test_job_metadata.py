@@ -13,23 +13,23 @@ import asyncio
 import dataclasses
 import pickle
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 from conftest import _job_json
 
-import comfy_sdk.client as _client_module
-from comfy_low.models import Job as LowJob
-from comfy_low.models import JobStatus
-from comfy_sdk import AsyncComfy, Comfy, ComfyError, InvalidWorkflow, JobSummary
-from comfy_sdk.router_exceptions import RateLimited
+import turbine_sdk.client as _client_module
+from turbine_low.models import Job as LowJob
+from turbine_low.models import JobStatus
+from turbine_sdk import AsyncTurbine, InvalidWorkflow, JobSummary, Turbine, TurbineError
+from turbine_sdk.router_exceptions import RateLimited
 
 _GRAPH = {"3": {"class_type": "KSampler", "inputs": {}}}
 _LABELS = {"client": "acme", "run": "nightly-42"}
 
 
-def _wf(client: Comfy | AsyncComfy):
+def _wf(client: Turbine | AsyncTurbine):
     return client.workflows.from_json(_GRAPH)
 
 
@@ -50,7 +50,7 @@ def _item(job_id: str, metadata: dict[str, str] | None = None) -> dict:
 
 
 def test_submit_sends_metadata_beside_the_workflow(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client), metadata=_LABELS)
     body = server.state.last_jobs_body
     assert body is not None
@@ -60,7 +60,7 @@ def test_submit_sends_metadata_beside_the_workflow(server) -> None:
 
 
 async def test_async_submit_sends_metadata_beside_the_workflow(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client), metadata=_LABELS)
     body = server.state.last_jobs_body
     assert body is not None
@@ -70,14 +70,14 @@ async def test_async_submit_sends_metadata_beside_the_workflow(server) -> None:
 
 @pytest.mark.parametrize("metadata", [None, {}])
 def test_submit_without_metadata_sends_the_body_it_always_did(server, metadata) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client), metadata=metadata)
     assert server.state.last_jobs_body == {"workflow": _GRAPH}
     assert job.metadata == {}
 
 
 async def test_async_submit_without_metadata_sends_the_body_it_always_did(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
     assert server.state.last_jobs_body == {"workflow": _GRAPH}
     assert job.metadata == {}
@@ -89,8 +89,8 @@ def test_a_refused_map_raises_the_servers_error_naming_the_key(server) -> None:
     server.state.job_error_message = (
         'metadata key "bad key" must be 1 to 40 characters from A-Z a-z 0-9 _ - .'
     )
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.submit(_wf(client), metadata={"bad key": "x"})
     assert excinfo.value.code == "metadata_invalid"
     assert excinfo.value.http_status == 422
@@ -106,8 +106,8 @@ async def test_async_too_many_pairs_raises_the_servers_error_with_the_count(serv
     message = "metadata has 17 pairs; at most 16 are allowed"
     server.state.job_error = (422, "metadata_invalid")
     server.state.job_error_message = message
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.submit(_wf(client), metadata={f"k{i}": "v" for i in range(17)})
     assert excinfo.value.code == "metadata_invalid"
     assert excinfo.value.http_status == 422
@@ -120,8 +120,8 @@ async def test_async_too_many_pairs_raises_the_servers_error_with_the_count(serv
 
 def test_a_host_without_label_support_refuses_with_its_own_code(server) -> None:
     server.state.job_error = (422, "metadata_not_supported")
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.submit(_wf(client), metadata=_LABELS)
     assert excinfo.value.code == "metadata_not_supported"
     assert excinfo.value.http_status == 422
@@ -134,7 +134,7 @@ def test_a_host_without_label_support_refuses_with_its_own_code(server) -> None:
 
 def test_a_fetched_job_exposes_its_metadata(server) -> None:
     server.state.job_metadata = _LABELS
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.jobs.get("job_01")
         assert job.metadata == _LABELS
         # A copy: editing it does not change the handle.
@@ -143,14 +143,14 @@ def test_a_fetched_job_exposes_its_metadata(server) -> None:
 
 
 def test_a_job_without_metadata_exposes_an_empty_dict(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.jobs.get("job_01")
     assert job.metadata == {}
 
 
 async def test_an_async_fetched_job_exposes_its_metadata(server) -> None:
     server.state.job_metadata = _LABELS
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.jobs.get("job_01")
         assert job.metadata == _LABELS
         await job.refresh()
@@ -159,14 +159,14 @@ async def test_an_async_fetched_job_exposes_its_metadata(server) -> None:
 
 def test_a_cancelled_job_keeps_its_metadata(server) -> None:
     server.state.job_metadata = _LABELS
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.jobs.get("job_01")
         assert job.cancel().metadata == _LABELS
 
 
 async def test_an_async_cancelled_job_keeps_its_metadata(server) -> None:
     server.state.job_metadata = _LABELS
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.jobs.get("job_01")
         assert (await job.cancel()).metadata == _LABELS
 
@@ -189,7 +189,7 @@ _ODD_METADATA = [
 @pytest.mark.parametrize(("sent", "read"), _ODD_METADATA)
 def test_odd_metadata_on_a_job_reads_as_labels_and_never_raises(server, sent, read) -> None:
     server.state.job_metadata = sent
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         job = client.submit(_wf(client))
         assert job.metadata == read
         assert client.jobs.get(job.id).metadata == read
@@ -203,7 +203,7 @@ async def test_async_odd_metadata_on_a_job_reads_as_labels_and_never_raises(
     server, sent, read
 ) -> None:
     server.state.job_metadata = sent
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         assert job.metadata == read
         assert (await client.jobs.get(job.id)).metadata == read
@@ -216,7 +216,7 @@ async def test_async_odd_metadata_on_a_job_reads_as_labels_and_never_raises(
 def test_odd_metadata_on_a_list_item_reads_as_labels_and_never_raises(server, sent, read) -> None:
     item: dict[str, Any] = {**_item("job_01"), "metadata": sent}
     server.state.job_list_pages = [[item]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (summary,) = client.list_jobs()
     assert summary.metadata == read
     assert summary.data["metadata"] == sent
@@ -235,7 +235,7 @@ _ODD_KEYS = {
 def test_every_string_label_survives_whatever_its_key(server) -> None:
     server.state.job_metadata = _ODD_KEYS
     server.state.job_list_pages = [[_item("job_01", _ODD_KEYS)]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert client.submit(_wf(client)).metadata == _ODD_KEYS
         assert client.jobs.get("job_01").metadata == _ODD_KEYS
         (summary,) = client.list_jobs()
@@ -244,7 +244,7 @@ def test_every_string_label_survives_whatever_its_key(server) -> None:
 
 def test_a_job_with_metadata_pickles(server) -> None:
     server.state.job_metadata = _LABELS
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         low = client._low
         for model in (
             low.post_jobs(_GRAPH),
@@ -258,7 +258,7 @@ def test_a_job_with_metadata_pickles(server) -> None:
 
 async def test_an_async_job_with_metadata_pickles(server) -> None:
     server.state.job_metadata = _LABELS
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         low = client._low
         for model in (
             await low.post_jobs(_GRAPH),
@@ -273,7 +273,7 @@ async def test_an_async_job_with_metadata_pickles(server) -> None:
 def test_odd_metadata_still_reads_once_the_generated_job_declares_a_strict_field() -> None:
     # A spec sync will add `metadata: dict[str, str]` to the generated `Job`.
     # Simulate that model and check the transport's lenient reading still wins.
-    from comfy_low.transport import _with_lenient_metadata
+    from turbine_low.transport import _with_lenient_metadata
 
     class SyncedJob(LowJob):
         metadata: dict[str, str] | None = None
@@ -294,7 +294,7 @@ def test_list_jobs_sends_filters_and_follows_the_cursor_to_the_last_page(server)
         [_item("job_03", _LABELS), _item("job_02", _LABELS)],
         [_item("job_01", _LABELS)],
     ]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         found = list(client.list_jobs(metadata={"client": "acme", "run": "nightly-42"}, limit=2))
     assert [j.id for j in found] == ["job_05", "job_04", "job_03", "job_02", "job_01"]
     assert all(j.metadata == _LABELS for j in found)
@@ -312,7 +312,7 @@ def test_list_jobs_sends_filters_and_follows_the_cursor_to_the_last_page(server)
 
 async def test_async_list_jobs_sends_filters_and_follows_the_cursor(server) -> None:
     server.state.job_list_pages = [[_item("job_02", _LABELS)], [_item("job_01", _LABELS)]]
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         found = [j async for j in client.list_jobs(metadata={"client": "acme"}, limit=1)]
     assert [j.id for j in found] == ["job_02", "job_01"]
     queries = server.state.job_list_queries
@@ -324,7 +324,7 @@ async def test_async_list_jobs_sends_filters_and_follows_the_cursor(server) -> N
 
 def test_list_jobs_with_no_arguments_sends_no_query(server) -> None:
     server.state.job_list_pages = [[_item("job_01")]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         found = list(client.list_jobs())
     assert [j.id for j in found] == ["job_01"]
     assert server.state.job_list_queries == [{}]
@@ -335,15 +335,15 @@ def test_list_jobs_with_no_arguments_sends_no_query(server) -> None:
 def test_list_jobs_items_keep_the_server_fields(server) -> None:
     item = _item("job_01")
     server.state.job_list_pages = [[item]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (summary,) = client.list_jobs()
     assert isinstance(summary, JobSummary)
     assert summary.id == "job_01"
     # A JobStatus value, the same string `Job.status` reports for that state.
     assert summary.status == "succeeded"
     assert JobStatus(summary.status) is JobStatus.succeeded
-    assert summary.create_time == datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
-    assert summary.update_time == datetime(2026, 10, 5, 12, 1, tzinfo=timezone.utc)
+    assert summary.create_time == datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+    assert summary.update_time == datetime(2026, 10, 5, 12, 1, tzinfo=UTC)
     assert summary.deployment_id == "dep_01"
     assert summary.metadata == {}
     assert summary.data == item
@@ -361,7 +361,7 @@ def test_a_filtered_list_skips_items_whose_labels_do_not_match(server) -> None:
         ],
         [{**_item("job_02"), "metadata": "client=acme"}, _item("job_01", _LABELS)],
     ]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         found = list(client.list_jobs(metadata={"client": "acme", "run": "nightly-42"}))
     assert [j.id for j in found] == ["job_06", "job_01"]
     assert len(server.state.job_list_queries) == 2
@@ -371,7 +371,7 @@ def test_a_filtered_list_compares_values_as_the_text_the_query_sends(server) -> 
     # `metadata={"run": 7}` is sent as `run=7`, which the server matches against
     # the label "7"; the client-side check must compare the same text.
     server.state.job_list_pages = [[_item("job_02", {"run": "7"}), _item("job_01", {"run": "8"})]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         found = list(client.list_jobs(metadata={"run": 7}))  # type: ignore[dict-item]
     assert [j.id for j in found] == ["job_02"]
     assert server.state.job_list_queries[0]["metadata[run]"] == ["7"]
@@ -387,7 +387,7 @@ def test_a_filtered_list_compares_values_as_the_text_the_query_sends(server) -> 
 def test_a_filtered_list_compares_exactly_the_pairs_the_query_sends(server, filters, sent) -> None:
     # The check must compare the key and the value as sent, not as given.
     server.state.job_list_pages = [[_item("job_02", {"1": "a"}), _item("job_01", {"1": "b"})]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         found = list(client.list_jobs(metadata=filters))
     assert [j.id for j in found] == ["job_02"]
     key, value = sent
@@ -396,7 +396,7 @@ def test_a_filtered_list_compares_exactly_the_pairs_the_query_sends(server, filt
 
 async def test_async_filtered_list_skips_items_whose_labels_do_not_match(server) -> None:
     server.state.job_list_pages = [[_item("job_02"), _item("job_01", _LABELS)]]
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         found = [j async for j in client.list_jobs(metadata={"client": "acme"})]
     assert [j.id for j in found] == ["job_01"]
 
@@ -405,7 +405,7 @@ def test_a_filtered_list_on_a_host_without_labels_yields_nothing(server) -> None
     # The self-hosted proxy's list: one page of its newest jobs, no filtering,
     # no `next_cursor`, and its `metadata` a string.
     server.state.job_list_pages = [[{**_item("job_01"), "metadata": "batch-7"}]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert list(client.list_jobs(metadata={"client": "acme"})) == []
 
 
@@ -423,7 +423,7 @@ def test_a_list_page_still_rate_limited_after_its_budget_raises(server, monkeypa
     # Ten 429s, then the page: only a deadline stops the retries before it.
     server.state.job_list_429_at = set(range(10))
     server.state.job_list_retry_after = "3"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         with pytest.raises(RateLimited):
             list(client.list_jobs())
     assert sleeps == [3]
@@ -436,7 +436,7 @@ def test_a_list_page_429_without_retry_after_raises_at_once(server, monkeypatch)
     server.state.job_list_pages = [[_item("job_01")]]
     server.state.job_list_429_at = {0}
     server.state.job_list_retry_after = None
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         with pytest.raises(RateLimited):
             list(client.list_jobs())
     assert sleeps == []
@@ -449,7 +449,7 @@ def test_list_jobs_waits_at_least_a_second_on_retry_after_zero(server, monkeypat
     server.state.job_list_pages = [[_item("job_01")]]
     server.state.job_list_429_at = {0}
     server.state.job_list_retry_after = "0"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert [j.id for j in client.list_jobs()] == ["job_01"]
     assert sleeps == [1.0]
 
@@ -466,14 +466,14 @@ async def test_async_list_jobs_waits_at_least_a_second_on_retry_after_zero(
     server.state.job_list_pages = [[_item("job_01")]]
     server.state.job_list_429_at = {0}
     server.state.job_list_retry_after = "0"
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         assert [j.id async for j in client.list_jobs()] == ["job_01"]
     assert sleeps == [1.0]
 
 
 def test_a_job_summary_can_be_hashed(server) -> None:
     server.state.job_list_pages = [[_item("job_01", _LABELS)]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (summary,) = client.list_jobs()
     assert summary in {summary}
 
@@ -483,7 +483,7 @@ def test_a_job_summary_prints_without_the_raw_item(server) -> None:
     # not write them into the caller's logs, as printing a `Job` does not.
     item = {**_item("job_01", _LABELS), "workflow": {"secret_node": {"inputs": {}}}}
     server.state.job_list_pages = [[item]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (summary,) = client.list_jobs()
     printed = repr(summary)
     assert "job_01" in printed
@@ -496,20 +496,20 @@ def test_a_job_summary_prints_without_the_raw_item(server) -> None:
 
 def test_a_page_without_jobs_yields_nothing_and_paging_continues(server) -> None:
     server.state.job_list_pages = [None, [_item("job_01")]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         found = list(client.list_jobs())
     assert [j.id for j in found] == ["job_01"]
 
 
 def test_a_last_page_without_jobs_yields_nothing(server) -> None:
     server.state.job_list_pages = [None]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert list(client.list_jobs()) == []
 
 
 async def test_async_a_page_without_jobs_yields_nothing_and_paging_continues(server) -> None:
     server.state.job_list_pages = [None, [_item("job_01")]]
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         found = [j async for j in client.list_jobs()]
     assert [j.id for j in found] == ["job_01"]
 
@@ -521,7 +521,7 @@ def test_list_jobs_retries_a_429_on_each_page_at_the_servers_pace(server, monkey
     # The first request for each page is answered 429 `Retry-After: 3`.
     server.state.job_list_429_at = {0, 2}
     server.state.job_list_retry_after = "3"
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         found = list(client.list_jobs(metadata={"client": "acme"}, limit=1))
     assert [j.id for j in found] == ["job_02", "job_01"]
     assert sleeps == [3, 3]
@@ -543,7 +543,7 @@ async def test_async_list_jobs_retries_a_429_on_each_page(server, monkeypatch) -
     server.state.job_list_pages = [[_item("job_02")], [_item("job_01")]]
     server.state.job_list_429_at = {0, 2}
     server.state.job_list_retry_after = "3"
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         found = [j async for j in client.list_jobs(limit=1)]
     assert [j.id for j in found] == ["job_02", "job_01"]
     assert sleeps == [3, 3]
@@ -552,7 +552,7 @@ async def test_async_list_jobs_retries_a_429_on_each_page(server, monkeypatch) -
 
 def test_list_jobs_items_without_optional_fields_read_as_none(server) -> None:
     server.state.job_list_pages = [[{"id": "job_01", "status": "queued"}]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (summary,) = client.list_jobs()
     assert summary.create_time is None
     assert summary.update_time is None
@@ -591,8 +591,8 @@ _BAD_LIST_ITEMS = [
 def test_a_bad_list_item_raises_invalid_response(server, item, named) -> None:
     # Raised, not skipped: skipping would hide a job from the caller.
     server.state.job_list_pages = [[item]]
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             list(client.list_jobs())
     assert excinfo.value.code == "invalid_response"
     assert named in str(excinfo.value)
@@ -601,8 +601,8 @@ def test_a_bad_list_item_raises_invalid_response(server, item, named) -> None:
 @pytest.mark.parametrize(("item", "named"), _BAD_LIST_ITEMS)
 async def test_async_bad_list_item_raises_invalid_response(server, item, named) -> None:
     server.state.job_list_pages = [[item]]
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             [j async for j in client.list_jobs()]
     assert excinfo.value.code == "invalid_response"
     assert named in str(excinfo.value)
@@ -611,7 +611,7 @@ async def test_async_bad_list_item_raises_invalid_response(server, item, named) 
 @pytest.mark.parametrize("item", [_with_null("deployment_id"), _without("deployment_id")])
 def test_a_null_or_absent_deployment_id_reads_as_none(server, item) -> None:
     server.state.job_list_pages = [[item]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (summary,) = client.list_jobs()
     assert summary.deployment_id is None
 
@@ -626,8 +626,8 @@ _BAD_PAGE_BODIES = [
 @pytest.mark.parametrize("body", _BAD_PAGE_BODIES)
 def test_a_page_that_is_not_an_object_raises_invalid_response(server, body) -> None:
     server.state.job_list_body = body
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             list(client.list_jobs())
     assert excinfo.value.code == "invalid_response"
     assert "not a JSON object" in str(excinfo.value)
@@ -636,8 +636,8 @@ def test_a_page_that_is_not_an_object_raises_invalid_response(server, body) -> N
 @pytest.mark.parametrize("body", _BAD_PAGE_BODIES)
 async def test_async_a_page_that_is_not_an_object_raises_invalid_response(server, body) -> None:
     server.state.job_list_body = body
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             [j async for j in client.list_jobs()]
     assert excinfo.value.code == "invalid_response"
     assert "not a JSON object" in str(excinfo.value)
@@ -654,8 +654,8 @@ _BAD_JOBS_FIELDS = [
 @pytest.mark.parametrize("jobs", _BAD_JOBS_FIELDS)
 def test_a_page_whose_jobs_is_not_an_array_raises_invalid_response(server, jobs) -> None:
     server.state.job_list_pages = [jobs]
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             list(client.list_jobs())
     assert excinfo.value.code == "invalid_response"
     assert "'jobs' is not an array" in str(excinfo.value)
@@ -666,8 +666,8 @@ async def test_async_a_page_whose_jobs_is_not_an_array_raises_invalid_response(
     server, jobs
 ) -> None:
     server.state.job_list_pages = [jobs]
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             [j async for j in client.list_jobs()]
     assert excinfo.value.code == "invalid_response"
     assert "'jobs' is not an array" in str(excinfo.value)
@@ -684,8 +684,8 @@ def _serve_a_repeated_cursor(server) -> None:
 def test_list_jobs_stops_when_the_server_repeats_a_cursor(server) -> None:
     _serve_a_repeated_cursor(server)
     found: list[str] = []
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             for summary in client.list_jobs():
                 found.append(summary.id)
     assert excinfo.value.code == "invalid_response"
@@ -697,8 +697,8 @@ def test_list_jobs_stops_when_the_server_repeats_a_cursor(server) -> None:
 async def test_async_list_jobs_stops_when_the_server_repeats_a_cursor(server) -> None:
     _serve_a_repeated_cursor(server)
     found: list[str] = []
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             async for summary in client.list_jobs():
                 found.append(summary.id)
     assert excinfo.value.code == "invalid_response"
@@ -720,8 +720,8 @@ _NON_STRING_CURSORS = pytest.mark.parametrize(
 def test_a_next_cursor_that_is_not_a_string_raises_invalid_response(server, cursor) -> None:
     server.state.job_list_pages = [[_item("job_02")], [_item("job_01")]]
     server.state.job_list_next_cursor_at = {0: cursor}
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             list(client.list_jobs())
     assert excinfo.value.code == "invalid_response"
     assert "'next_cursor' is not a string" in str(excinfo.value)
@@ -734,8 +734,8 @@ async def test_async_a_next_cursor_that_is_not_a_string_raises_invalid_response(
 ) -> None:
     server.state.job_list_pages = [[_item("job_02")], [_item("job_01")]]
     server.state.job_list_next_cursor_at = {0: cursor}
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             [j async for j in client.list_jobs()]
     assert excinfo.value.code == "invalid_response"
     assert "'next_cursor' is not a string" in str(excinfo.value)
@@ -746,7 +746,7 @@ async def test_async_a_next_cursor_that_is_not_a_string_raises_invalid_response(
 def test_a_null_or_empty_next_cursor_ends_the_list(server, cursor) -> None:
     server.state.job_list_pages = [[_item("job_02")], [_item("job_01")]]
     server.state.job_list_next_cursor_at = {0: cursor}
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert [j.id for j in client.list_jobs()] == ["job_02"]
     assert len(server.state.job_list_queries) == 1
 
@@ -759,13 +759,11 @@ def test_list_jobs_reads_nanosecond_times_and_tolerates_unreadable_ones(server) 
         "update_time": "not a time",
     }
     server.state.job_list_pages = [[item]]
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         (summary,) = client.list_jobs()
     assert summary.create_time is not None
     assert summary.create_time.tzinfo is not None
-    assert summary.create_time.replace(microsecond=0) == datetime(
-        2026, 10, 5, 12, 0, tzinfo=timezone.utc
-    )
+    assert summary.create_time.replace(microsecond=0) == datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
     assert summary.update_time is None
     assert summary.data["update_time"] == "not a time"
 
@@ -777,8 +775,8 @@ _CURSOR_REFUSED = "cursor is not well-formed: pass back a page's next_cursor unc
 
 def test_list_jobs_surfaces_a_refused_filter(server) -> None:
     server.state.job_list_error = (400, "invalid_metadata_filter", _FOUR_FILTERS_REFUSED)
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             list(client.list_jobs(metadata={"a": "1", "b": "2", "c": "3", "d": "4"}))
     assert excinfo.value.code == "invalid_metadata_filter"
     assert excinfo.value.http_status == 400
@@ -786,8 +784,8 @@ def test_list_jobs_surfaces_a_refused_filter(server) -> None:
 
 def test_list_jobs_surfaces_a_refused_cursor(server) -> None:
     server.state.job_list_error = (400, "invalid_cursor", _CURSOR_REFUSED)
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             list(client.list_jobs())
     assert excinfo.value.code == "invalid_cursor"
     assert excinfo.value.http_status == 400
@@ -797,8 +795,8 @@ def test_list_jobs_surfaces_a_refused_cursor(server) -> None:
 def test_list_jobs_on_a_host_that_cannot_list_raises_not_implemented(server) -> None:
     # Comfy Cloud's answer until it lists jobs.
     server.state.job_list_error = (501, "not_implemented", "listing jobs is not supported here")
-    with Comfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             list(client.list_jobs())
     assert excinfo.value.code == "not_implemented"
     assert excinfo.value.http_status == 501
@@ -808,7 +806,7 @@ def test_list_jobs_on_a_host_that_cannot_list_raises_not_implemented(server) -> 
 
 async def test_async_list_jobs_surfaces_a_refused_filter(server) -> None:
     server.state.job_list_error = (400, "invalid_metadata_filter", _FOUR_FILTERS_REFUSED)
-    async with AsyncComfy() as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             [j async for j in client.list_jobs(metadata={"a": "1", "b": "2", "c": "3", "d": "4"})]
     assert excinfo.value.code == "invalid_metadata_filter"

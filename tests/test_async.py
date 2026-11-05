@@ -7,11 +7,11 @@ import io
 
 import pytest
 
-import comfy_sdk.client as _client_module
-from comfy_sdk import AsyncComfy, MissingAsset, NotFound, Progress, StatusChange
+import turbine_sdk.client as _client_module
+from turbine_sdk import AsyncTurbine, MissingAsset, NotFound, Progress, StatusChange
 
 
-def _wf(client: AsyncComfy):
+def _wf(client: AsyncTurbine):
     return client.workflows.from_json({"3": {"class_type": "KSampler", "inputs": {}}})
 
 
@@ -22,7 +22,7 @@ class _ShortWriter(io.BytesIO):
 
 async def test_async_run_and_download(server, tmp_path) -> None:
     server.state.polls_to_succeed = 2
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.run(_wf(client))
         assert job.status == "succeeded"
         out = job.get_outputs("13")[0]
@@ -32,7 +32,7 @@ async def test_async_run_and_download(server, tmp_path) -> None:
 
 async def test_async_output_to_stream_writes_all_bytes(server) -> None:
     stream = _ShortWriter()
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.run(_wf(client))
         written = await job.get_outputs("13")[0].to_stream(stream)
     assert written == len(server.state.content_bytes)
@@ -40,7 +40,7 @@ async def test_async_output_to_stream_writes_all_bytes(server) -> None:
 
 
 async def test_async_events_stream_to_terminal(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         seen = [e async for e in job.events()]
     assert isinstance(seen[-1], StatusChange)
@@ -54,7 +54,7 @@ async def test_async_sse_reconnect_with_no_replay(server) -> None:
     # the async client must reconnect (fresh live frames, nothing replayed).
     server.state.sse_mode = "reconnect"
     server.state.polls_to_succeed = 1000
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         seen = [e async for e in job.events()]
 
@@ -71,7 +71,7 @@ async def test_async_range_download_returns_partial(server) -> None:
     # The sync client has range-download coverage (test_download_and_workflows.py);
     # the async `to_bytes(range=...)` path was never exercised.
     server.state.content_bytes = b"0123456789abcdef"
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.run(_wf(client))
         out = job.get_outputs("13")[0]
         head = await out.to_bytes(range=(0, 4))
@@ -81,7 +81,7 @@ async def test_async_range_download_returns_partial(server) -> None:
 async def test_async_dedup_fast_path(server, tmp_path) -> None:
     p = tmp_path / "photo.png"
     p.write_bytes(b"async-dedup-bytes")
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_file(p)
         server.state.known_hashes.add(asset.hash)
         asset_id = await asset.commit()
@@ -92,12 +92,12 @@ async def test_async_dedup_fast_path(server, tmp_path) -> None:
 async def test_async_real_upload_of_fresh_file_succeeds(server, tmp_path) -> None:
     # Deliberately do NOT seed `known_hashes` — the dedup HEAD probe misses, so
     # `commit()` must drive a real multipart upload over the AsyncClient. Before
-    # the fix, `AsyncComfyLow.post_assets` handed httpx a *sync* generator body,
+    # the fix, `AsyncTurbineLow.post_assets` handed httpx2 a *sync* generator body,
     # which raises RuntimeError ("Attempted to send a sync request with an
-    # AsyncClient instance") the moment httpx tries to send it.
+    # AsyncClient instance") the moment httpx2 tries to send it.
     p = tmp_path / "fresh.bin"
     p.write_bytes(b"a fresh, never-before-seen payload that forces a real upload")
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_file(p)
         asset_id = await asset.commit()
     assert asset_id == "asset_uploaded_01"
@@ -108,13 +108,13 @@ async def test_async_real_upload_of_fresh_file_succeeds(server, tmp_path) -> Non
 
 async def test_async_error_mapping(server) -> None:
     server.state.job_error = (422, "missing_asset")
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         with pytest.raises(MissingAsset):
             await client.submit(_wf(client))
 
 
 async def test_async_cancel_reaches_server(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         await job.cancel()
         assert job.status == "canceling"
@@ -122,7 +122,7 @@ async def test_async_cancel_reaches_server(server) -> None:
 
 async def test_async_wait_raises_timeout(server) -> None:
     server.state.polls_to_succeed = 10_000
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
         with pytest.raises(TimeoutError):
             await job.wait(timeout=0.05)
@@ -132,7 +132,7 @@ async def test_async_core_asset_substitution(server, tmp_path) -> None:
     # The async commit -> mint -> substitute pipeline, mirroring the sync test.
     p = tmp_path / "photo.png"
     p.write_bytes(b"pixels")
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_file(p)
         wf = client.workflows.from_json(
             {"10": {"class_type": "LoadImage", "inputs": {"image": asset}}}
@@ -145,7 +145,7 @@ async def test_async_core_asset_substitution(server, tmp_path) -> None:
 
 async def test_async_submit_with_api_key_sends_extra_data(server) -> None:
     # Mirrors the sync `test_submit_with_api_key_sends_extra_data_sibling_of_workflow`.
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.submit(_wf(client), api_key="comfyui-secret-key")
     body = server.state.last_jobs_body
     assert body is not None
@@ -153,7 +153,7 @@ async def test_async_submit_with_api_key_sends_extra_data(server) -> None:
 
 
 async def test_async_submit_without_api_key_omits_extra_data(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.submit(_wf(client))
     body = server.state.last_jobs_body
     assert body is not None
@@ -162,7 +162,7 @@ async def test_async_submit_without_api_key_omits_extra_data(server) -> None:
 
 async def test_async_queue_full_retries_with_retry_after(server) -> None:
     server.state.queue_full_times = 2  # 429 twice, then 201
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.submit(_wf(client))
     assert server.state.submit_count == 3
 
@@ -182,7 +182,7 @@ async def test_async_submit_clamps_huge_retry_after_to_remaining_budget(
 
     monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
     server.state.queue_full_retry_after_header = "10000000"
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
     assert job.id.startswith("job_")
     assert server.state.submit_count == 2
@@ -201,14 +201,14 @@ async def test_async_submit_negative_retry_after_does_not_storm(server, monkeypa
 
     monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
     server.state.queue_full_retry_after_header = "-5"
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         job = await client.submit(_wf(client))
     assert job.id.startswith("job_")
     assert sleeps == [1.0]
 
 
 async def test_async_delete_asset_by_id(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.assets.delete("asset_uuid_01")
         with pytest.raises(NotFound):
             await client.assets.get("asset_uuid_01")
@@ -218,7 +218,7 @@ async def test_async_delete_asset_by_id(server) -> None:
 
 async def test_async_delete_asset_on_asset_instance(server) -> None:
     data = b"async-delete-me-bytes"
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_bytes(data, filename="photo.png")
         asset_id = await asset.commit()
         await asset.delete()
@@ -231,7 +231,7 @@ async def test_async_delete_asset_on_asset_instance(server) -> None:
 
 
 async def test_async_delete_uncommitted_asset_raises(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         asset = client.assets.from_bytes(b"not-uploaded", filename="photo.png")
         with pytest.raises(RuntimeError, match="uncommitted"):
             await asset.delete()

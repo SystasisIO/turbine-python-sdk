@@ -1,8 +1,8 @@
 """Sync/async public-surface parity, derived by introspection.
 
 The README promises "swap the import and add ``await``" as the only difference
-between :class:`~comfy_sdk.client.Comfy` and
-:class:`~comfy_sdk.client.AsyncComfy`, and the awaitable form of an operation is
+between :class:`~turbine_sdk.client.Turbine` and
+:class:`~turbine_sdk.client.AsyncTurbine`, and the awaitable form of an operation is
 deliberately the *async client* rather than a suffixed method. Both only hold
 while the two surfaces stay symmetric, and the failure mode is quiet: a method
 lands on one client, the other silently lacks it, and nobody finds out until a
@@ -12,7 +12,7 @@ So this module walks the surface rather than listing it. A hand-maintained list
 of pairs is the thing that goes stale first — it cannot fail for the class
 somebody forgot to add to it. Pairs are discovered two ways:
 
-* every public ``AsyncX`` class defined in ``comfy_sdk`` / ``comfy_low`` is
+* every public ``AsyncX`` class defined in ``turbine_sdk`` / ``turbine_low`` is
   paired with its ``X`` counterpart (a missing counterpart is itself a
   failure); and
 * both clients are constructed and their public namespace attributes
@@ -43,28 +43,23 @@ import contextlib
 import functools
 import importlib
 import inspect
-import os
 import pkgutil
 import re
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
-import comfy_low
-import comfy_sdk
-from comfy_sdk import AsyncComfy, Comfy
-from comfy_sdk.client import BASE_URL_ENV_VAR, ROUTER_BASE_URL_ENV_VAR
+import turbine_low
+import turbine_sdk
+from turbine_sdk import AsyncTurbine, Turbine
 
 #: The packages whose public classes make up the surface under test.
-_PACKAGES = (comfy_sdk, comfy_low)
+_PACKAGES = (turbine_sdk, turbine_low)
 _PACKAGE_NAMES = {p.__name__ for p in _PACKAGES}
 
-#: Constructing a Cloud-targeted client requires a key. Nothing here makes a
-#: request, so any non-empty string does. Instantiating is what exposes the
-#: namespaces at all: they are assigned in ``__init__``, so no amount of
-#: class-level introspection would find them.
-_DUMMY_KEY = "comfyui-parity-test-key"
+#: Construction exposes namespaces assigned in __init__; this dummy key
+#: exercises the configured surface without making any requests.
+_DUMMY_KEY = "turbine-parity-test-key"
 
 # --- deliberate asymmetries ---------------------------------------------
 #
@@ -78,7 +73,7 @@ _DUMMY_KEY = "comfyui-parity-test-key"
 #: Async spellings of the same operation under a different name, applied to the
 #: *async* side only. asyncio's convention is ``aclose()`` for an awaitable
 #: closer; ``close()`` cannot be reused for it, because a name callers expect to
-#: be synchronous returning an un-awaited coroutine fails silently. httpx and
+#: be synchronous returning an un-awaited coroutine fails silently. httpx2 and
 #: asyncio's own streams spell it the same way. Renaming only the async side is
 #: what keeps the normalisation direction-aware: a sync class that grew an
 #: ``aclose``, or an async class that kept a bare ``close``, is a real
@@ -94,19 +89,19 @@ _ALLOWED_ASYMMETRY: dict[tuple[str, str], str] = {}
 #: client, since that is the entire "add ``await``" contract; these do no I/O,
 #: so awaiting them would be ceremony with nothing behind it.
 _SYNC_ON_BOTH: dict[tuple[str, str], str] = {
-    ("comfy_sdk.assets.AssetFactory", "from_file"): (
+    ("turbine_sdk.assets.AssetFactory", "from_file"): (
         "builds a handle around a local path; the upload is the awaitable step (commit)"
     ),
-    ("comfy_sdk.assets.AssetFactory", "from_bytes"): (
+    ("turbine_sdk.assets.AssetFactory", "from_bytes"): (
         "builds a handle around bytes already in memory; the upload is commit"
     ),
-    ("comfy_sdk.assets.AssetFactory", "from_stream"): (
+    ("turbine_sdk.assets.AssetFactory", "from_stream"): (
         "drains a synchronous BinaryIO to hash it; the upload is commit"
     ),
-    ("comfy_sdk.jobs.Job", "get_outputs"): (
+    ("turbine_sdk.jobs.Job", "get_outputs"): (
         "reads outputs already on the handle — no re-fetch, so nothing to await"
     ),
-    ("comfy_sdk.models.Models", "list"): (
+    ("turbine_sdk.models.Models", "list"): (
         "builds a lazy AsyncModelList and fetches nothing; `async for` and its awaited "
         "page() are the I/O, so `async for m in client.models.list()` needs no extra await"
     ),
@@ -114,7 +109,7 @@ _SYNC_ON_BOTH: dict[tuple[str, str], str] = {
 
 #: A name that encodes sync-vs-async instead of letting the client encode it.
 #: ``run_async`` is the specific decision this guards — there is one ``run``,
-#: and its awaitable form is ``AsyncComfy().models.run`` — and the pattern
+#: and its awaitable form is ``AsyncTurbine().models.run`` — and the pattern
 #: generalises it, so a second name for one operation cannot land on review
 #: oversight alone. A published method name cannot be withdrawn.
 _SUFFIXED = re.compile(r"(^async_|_async$|_sync$|^a_)")
@@ -134,7 +129,7 @@ def _public_classes() -> list[type]:
     """Public classes defined anywhere in the two packages, each listed once.
 
     Keyed on the defining module rather than the bare name: the wire models in
-    ``comfy_low.models`` share names (``Asset``, ``Job``, ``Output``) with the
+    ``turbine_low.models`` share names (``Asset``, ``Job``, ``Output``) with the
     hand-written SDK handles, and collapsing those together would pair a client
     handle against a pydantic model.
     """
@@ -145,7 +140,7 @@ def _public_classes() -> list[type]:
                 if name.startswith("_") or not inspect.isclass(obj):
                     continue
                 if obj.__module__.split(".")[0] not in _PACKAGE_NAMES:
-                    continue  # re-exported from elsewhere (httpx, pydantic, ...)
+                    continue  # re-exported from elsewhere (httpx2, pydantic, ...)
                 classes[(obj.__module__, obj.__qualname__)] = obj
     return list(classes.values())
 
@@ -202,30 +197,6 @@ def _name_convention_pairs() -> list[tuple[str, type, type]]:
     return pairs
 
 
-@contextlib.contextmanager
-def _default_deployment() -> Iterator[None]:
-    """Build the probe clients against the default deployment, not the runner's.
-
-    ``_resolve_base_url()`` *raises* on a malformed ``COMFY_BASE_URL``, and the
-    construction below runs at import — i.e. at collection time, before any
-    fixture could adjust the environment. Inheriting an ambient value would let
-    a stray export in a developer's shell turn this whole module into a
-    collection error that has nothing to do with parity.
-
-    Both target variables, for exactly the same reason:
-    ``_resolve_router_base_url()`` raises the same way on a malformed
-    ``COMFY_ROUTER_BASE_URL``, and a client construction reads both.
-    """
-    names = (BASE_URL_ENV_VAR, ROUTER_BASE_URL_ENV_VAR)
-    saved = {name: os.environ.pop(name, None) for name in names}
-    try:
-        yield
-    finally:
-        for name, value in saved.items():
-            if value is not None:
-                os.environ[name] = value
-
-
 def _run(coro: Any) -> None:
     """Drive one coroutine to completion on a loop of our own.
 
@@ -268,10 +239,10 @@ def _client_namespaces() -> tuple[dict[str, type], dict[str, type]]:
     ``finally``, so a raise from the second construction still closes the first
     client's pool, and a raise from one close still runs the other.
     """
-    with _default_deployment(), contextlib.ExitStack() as stack:
-        sync_client = Comfy(api_key=_DUMMY_KEY)
+    with contextlib.ExitStack() as stack:
+        sync_client = Turbine(base_url="http://127.0.0.1:8189", api_key=_DUMMY_KEY)
         stack.callback(sync_client.close)
-        async_client = AsyncComfy(api_key=_DUMMY_KEY)
+        async_client = AsyncTurbine(base_url="http://127.0.0.1:8189", api_key=_DUMMY_KEY)
         stack.callback(lambda: _run(async_client.aclose()))
         return _namespace_types(sync_client), _namespace_types(async_client)
 
@@ -306,7 +277,7 @@ def _discover_pairs() -> list[tuple[str, type, type]]:
     a discovery. Everything else falls out of the two mechanisms above, so a
     class or namespace added later is covered without editing this file.
     """
-    pairs = [("Comfy", Comfy, AsyncComfy), *_name_convention_pairs(), *_namespace_pairs()]
+    pairs = [("Turbine", Turbine, AsyncTurbine), *_name_convention_pairs(), *_namespace_pairs()]
     seen: dict[tuple[str, str], tuple[str, type, type]] = {}
     for label, sync_cls, async_cls in pairs:
         # Both halves module-qualified: two distinct ``AsyncX`` classes in

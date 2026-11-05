@@ -22,29 +22,27 @@ import re
 from collections.abc import Mapping
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 
-from comfy_low.errors import ApiError as LowApiError
-from comfy_low.transport import (
+from turbine_low.errors import ApiError as LowApiError
+from turbine_low.transport import (
     MODEL_RUN_TIMEOUT,
     ROUTER_BASE_URL,
-    AsyncComfyLow,
-    ComfyLow,
+    AsyncTurbineLow,
+    TurbineLow,
     model_run_request,
     parse_model_id,
 )
-from comfy_sdk import (
-    COMFY_ROUTER_BASE_URL,
+from turbine_sdk import (
     NO_RETRY,
-    ROUTER_BASE_URL_ENV_VAR,
-    AsyncComfy,
-    Comfy,
+    AsyncTurbine,
     RetryPolicy,
+    Turbine,
 )
-from comfy_sdk.exceptions import ComfyError, NotFound, Unauthorized
-from comfy_sdk.models import AsyncModels, Models, RouterRunResult
-from comfy_sdk.router_exceptions import (
+from turbine_sdk.exceptions import NotFound, TurbineError, Unauthorized
+from turbine_sdk.models import AsyncModels, Models, RouterRunResult
+from turbine_sdk.router_exceptions import (
     ERROR_TYPE_HEADER,
     DeadlineExceeded,
     InvalidInput,
@@ -64,22 +62,22 @@ ARGS = {"prompt": "a cat", "steps": 4}
 
 
 def test_run_returns_the_completed_result(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert result == server.state.model_run_result
     assert server.state.model_run_count == 1
 
 
 async def test_async_run_is_awaitable_and_returns_the_same_shape(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         result = await client.models.run(MODEL, ARGS)
     assert result == server.state.model_run_result
 
 
 async def test_both_clients_return_an_identical_result(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         sync_result = client.models.run(MODEL, ARGS)
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         async_result = await client.models.run(MODEL, ARGS)
     assert sync_result == async_result
 
@@ -89,7 +87,7 @@ def test_the_result_is_the_providers_native_payload_not_a_wrapper(server) -> Non
     # in between, nothing renamed, nothing dropped.
     payload = {"video": {"url": "http://example.invalid/v.mp4"}, "nsfw": False}
     server.state.model_run_result = payload
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         result = client.models.run(MODEL, ARGS)
     assert type(result) is dict
     assert result == payload
@@ -97,7 +95,7 @@ def test_the_result_is_the_providers_native_payload_not_a_wrapper(server) -> Non
 
 def test_a_created_shaped_success_is_also_a_result(server) -> None:
     server.state.model_run_status = 201
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
 
 
@@ -108,7 +106,7 @@ def test_run_addresses_the_model_by_path_and_sends_the_native_body(server) -> No
     # The wire shape Router declares: the id is the two path segments of
     # `/v2/models/{provider}/{model}`, and the body is the partner model's OWN
     # native JSON input, forwarded unchanged — no `{model, arguments}` envelope.
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.models.run(MODEL, ARGS)
     assert server.state.last_model_run_path == "/v2/models/acme/flux-dev"
     assert server.state.last_model_run_provider == "acme"
@@ -119,7 +117,7 @@ def test_run_addresses_the_model_by_path_and_sends_the_native_body(server) -> No
 
 
 async def test_the_async_client_addresses_the_route_the_same_way(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.models.run(MODEL, ARGS)
     assert server.state.last_model_run_path == "/v2/models/acme/flux-dev"
     assert server.state.last_model_run_body == ARGS
@@ -275,7 +273,7 @@ def test_a_non_string_model_id_is_a_type_error_not_a_value_error() -> None:
 
 
 def test_a_malformed_id_never_reaches_the_server(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         with pytest.raises(ValueError):
             client.models.run("acme/flux/dev", ARGS)
     assert server.state.model_run_count == 0
@@ -285,7 +283,7 @@ def test_run_accepts_any_mapping_and_does_not_alias_the_callers_object(server) -
     from types import MappingProxyType
 
     caller_args = {"prompt": "a dog"}
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.models.run(MODEL, MappingProxyType(caller_args))
     assert server.state.last_model_run_body == {"prompt": "a dog"}
     _path, body, _headers = model_run_request(MODEL, caller_args, None)
@@ -296,63 +294,46 @@ def test_run_accepts_any_mapping_and_does_not_alias_the_callers_object(server) -
 # --- which host the run is addressed to ---------------------------------
 
 
-def test_the_default_router_base_url_is_the_public_one() -> None:
-    assert COMFY_ROUTER_BASE_URL == ROUTER_BASE_URL == "https://api.comfy.org"
-    assert ROUTER_BASE_URL_ENV_VAR == "COMFY_ROUTER_BASE_URL"
+def test_the_canonical_router_wire_origin_is_preserved() -> None:
+    assert ROUTER_BASE_URL == "https://api.comfy.org"
 
 
-def test_a_client_defaults_to_the_public_router(monkeypatch) -> None:
-    # No `server` fixture here on purpose: that fixture is what points the
-    # router at the stub, so this asserts the *unconfigured* default.
-    monkeypatch.delenv(ROUTER_BASE_URL_ENV_VAR, raising=False)
-    with Comfy(api_key="comfyui-test") as client:
-        assert client.models.base_url == "https://api.comfy.org"
-        assert client._low.router_base_url == "https://api.comfy.org"
+def test_router_is_disabled_by_default(server, monkeypatch) -> None:
+    monkeypatch.setenv("TURBINE_ROUTER_BASE_URL", "https://router.example")
+    monkeypatch.setenv("COMFY_ROUTER_BASE_URL", "https://api.comfy.org")
+    with Turbine() as client:
+        assert client.models.base_url is None
+        assert client._low.router_base_url is None
+        with pytest.raises(ValueError, match="Router is disabled.*router_base_url"):
+            client.models.run(MODEL, ARGS)
+    assert server.state.model_run_count == 0
 
 
-def test_the_router_env_var_redirects_model_runs(monkeypatch, server) -> None:
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, "http://127.0.0.1:9/router")
-    with Comfy() as client:
-        assert client.models.base_url == "http://127.0.0.1:9/router"
+async def test_async_router_is_disabled_by_default(server) -> None:
+    async with AsyncTurbine() as client:
+        assert client.models.base_url is None
+        with pytest.raises(ValueError, match="Router is disabled"):
+            await client.models.run(MODEL, ARGS)
+    assert server.state.model_run_count == 0
 
 
-@pytest.mark.parametrize("blank", ["", "   "])
-def test_a_blank_router_env_var_means_the_default(monkeypatch, blank: str) -> None:
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, blank)
-    with Comfy(api_key="comfyui-test") as client:
-        assert client.models.base_url == COMFY_ROUTER_BASE_URL
+@pytest.mark.parametrize(
+    "router", ["", "   ", "not-a-url", "ftp://h", "https://h?x=1", "https://h#f"]
+)
+def test_invalid_explicit_router_is_rejected(server, router: str) -> None:
+    with pytest.raises(ValueError, match="router_base_url"):
+        Turbine(router_base_url=router)
 
 
-def test_a_trailing_slash_on_the_router_env_var_is_stripped(monkeypatch) -> None:
-    # It is concatenated with a path that already starts with `/`, so a kept
-    # slash would request `//v2/models/...` — a different path to an origin
-    # server than the one the vendored spec declares.
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, "https://router.example/")
-    with Comfy(api_key="comfyui-test") as client:
-        assert client.models.base_url == "https://router.example"
-
-
-@pytest.mark.parametrize("bad", ["not-a-url", "ftp://h", "https://h?x=1", "https://h#f"])
-def test_a_malformed_router_env_var_is_rejected(monkeypatch, bad: str) -> None:
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, bad)
-    with pytest.raises(ValueError, match=ROUTER_BASE_URL_ENV_VAR):
-        Comfy(api_key="comfyui-test")
-
-
-def test_the_models_namespace_reports_the_router_not_the_v2_deployment(monkeypatch, server) -> None:
-    # The distinction this whole binding rests on: jobs and assets resolve
-    # under COMFY_BASE_URL, model runs under COMFY_ROUTER_BASE_URL, and they
-    # are different hosts by default.
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, "https://router.example")
-    with Comfy() as client:
+def test_explicit_router_target_and_slash_normalization(server) -> None:
+    with Turbine(router_base_url="https://router.example/") as client:
         assert client.models.base_url == "https://router.example"
         assert client._low.base_url == server.base_url
         assert repr(client.models) == "Models(base_url='https://router.example')"
 
 
-async def test_the_async_namespace_reports_the_router_too(monkeypatch, server) -> None:
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, "https://router.example")
-    async with AsyncComfy() as client:
+async def test_async_explicit_router_target(server) -> None:
+    async with AsyncTurbine(router_base_url="https://router.example") as client:
         assert client.models.base_url == "https://router.example"
         assert repr(client.models) == "AsyncModels(base_url='https://router.example')"
 
@@ -360,7 +341,7 @@ async def test_the_async_namespace_reports_the_router_too(monkeypatch, server) -
 # --- the awaitable form is AsyncClient, not a run_async() suffix ---------
 
 _SUFFIXED = re.compile(r"(^async_|_async$|_sync$)")
-_SURFACE = [Comfy, AsyncComfy, Models, AsyncModels, ComfyLow, AsyncComfyLow]
+_SURFACE = [Turbine, AsyncTurbine, Models, AsyncModels, TurbineLow, AsyncTurbineLow]
 
 
 @pytest.mark.parametrize("cls", _SURFACE, ids=lambda c: c.__name__)
@@ -401,7 +382,7 @@ def test_both_clients_spell_the_operation_the_same_way() -> None:
 
 
 def test_the_default_timeout_is_minutes_not_tens_of_seconds() -> None:
-    assert isinstance(MODEL_RUN_TIMEOUT, httpx.Timeout)
+    assert isinstance(MODEL_RUN_TIMEOUT, httpx2.Timeout)
     assert MODEL_RUN_TIMEOUT.read is not None and MODEL_RUN_TIMEOUT.read >= 120
     # Connecting is not generating: an unreachable host still fails fast.
     assert MODEL_RUN_TIMEOUT.connect is not None and MODEL_RUN_TIMEOUT.connect <= 30
@@ -411,13 +392,13 @@ def test_a_run_outlives_the_clients_own_timeout(server) -> None:
     # The client is configured for ordinary API calls; the run holds the
     # connection past that and must still complete.
     server.state.model_run_delay = 0.75
-    with Comfy(timeout=0.2) as client:
+    with Turbine(timeout=0.2, router_base_url=server.base_url) as client:
         assert client.models.run(MODEL, ARGS) == server.state.model_run_result
 
 
 async def test_an_async_run_outlives_the_clients_own_timeout(server) -> None:
     server.state.model_run_delay = 0.75
-    async with AsyncComfy(timeout=0.2) as client:
+    async with AsyncTurbine(timeout=0.2, router_base_url=server.base_url) as client:
         assert await client.models.run(MODEL, ARGS) == server.state.model_run_result
 
 
@@ -426,15 +407,15 @@ def test_the_clients_own_timeout_would_have_aborted_that_run(server) -> None:
     # client really does abort at 0.75s — so they are proving the override,
     # not a stub that answers instantly.
     server.state.model_run_delay = 0.75
-    with Comfy(timeout=0.2) as client:
-        with pytest.raises(httpx.TimeoutException):
+    with Turbine(timeout=0.2, router_base_url=server.base_url) as client:
+        with pytest.raises(httpx2.TimeoutException):
             client.models.run(MODEL, ARGS, timeout=0.2)
 
 
 def test_an_explicit_timeout_overrides_the_default(server) -> None:
     server.state.model_run_delay = 0.5
-    with Comfy() as client:
-        with pytest.raises(httpx.TimeoutException):
+    with Turbine(router_base_url=server.base_url) as client:
+        with pytest.raises(httpx2.TimeoutException):
             client.models.run(MODEL, ARGS, timeout=0.05)
 
 
@@ -442,14 +423,14 @@ def test_an_explicit_timeout_overrides_the_default(server) -> None:
 
 
 def test_run_sends_an_idempotency_key(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.models.run(MODEL, ARGS)
     (key,) = server.state.model_run_idempotency_keys
     assert key
 
 
 async def test_async_run_sends_an_idempotency_key(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.models.run(MODEL, ARGS)
     (key,) = server.state.model_run_idempotency_keys
     assert key
@@ -457,7 +438,7 @@ async def test_async_run_sends_an_idempotency_key(server) -> None:
 
 def test_each_run_mints_a_fresh_key(server) -> None:
     # A second run is a second generation, not a retry of the first.
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.models.run(MODEL, ARGS)
         client.models.run(MODEL, ARGS)
     first, second = server.state.model_run_idempotency_keys
@@ -465,13 +446,13 @@ def test_each_run_mints_a_fresh_key(server) -> None:
 
 
 def test_an_explicit_key_is_sent_verbatim(server) -> None:
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         client.models.run(MODEL, ARGS, idempotency_key="caller-chosen-01")
     assert server.state.model_run_idempotency_keys == ["caller-chosen-01"]
 
 
 async def test_an_explicit_key_is_sent_verbatim_on_the_async_client(server) -> None:
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         await client.models.run(MODEL, ARGS, idempotency_key="caller-chosen-02")
     assert server.state.model_run_idempotency_keys == ["caller-chosen-02"]
 
@@ -481,7 +462,7 @@ async def test_an_explicit_key_is_sent_verbatim_on_the_async_client(server) -> N
 
 def test_run_carries_the_host_clients_credentials(server) -> None:
     server.state.require_auth = True
-    with Comfy(api_key="k-run") as client:
+    with Turbine(api_key="k-run", router_base_url=server.base_url) as client:
         client.models.run(MODEL, ARGS)
     assert server.state.last_auth_header == "Bearer k-run"
 
@@ -489,11 +470,10 @@ def test_run_carries_the_host_clients_credentials(server) -> None:
 def test_the_key_reaches_the_router_when_it_is_a_separate_origin(
     monkeypatch, server, second_server
 ) -> None:
-    # The production shape: `COMFY_BASE_URL` and `COMFY_ROUTER_BASE_URL` are
+    # The production shape: `TURBINE_BASE_URL` and `router_base_url` are
     # different hosts. The client's own credential goes to *both* of its
     # configured targets — otherwise every real model run would be a 401.
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, second_server.base_url)
-    with Comfy(api_key="k-router") as client:
+    with Turbine(api_key="k-router", router_base_url=second_server.base_url) as client:
         client.models.run(MODEL, ARGS)
     assert second_server.state.last_auth_header == "Bearer k-router"
     assert second_server.state.model_run_count == 1
@@ -506,8 +486,7 @@ def test_the_key_is_not_sent_to_a_third_origin(monkeypatch, server, second_serve
     # pointing at `second_server` must still get nothing, and widening the
     # credential rule to cover the router origin must not have widened it to
     # "any absolute URL".
-    monkeypatch.setenv(ROUTER_BASE_URL_ENV_VAR, "https://router.example")
-    with Comfy(api_key="k-not-yours") as client:
+    with Turbine(api_key="k-not-yours", router_base_url="https://router.example") as client:
         client._low.get_job(f"{second_server.base_url}/api/v2/jobs/whatever")
     assert second_server.state.last_auth_header == ""
 
@@ -517,14 +496,14 @@ def test_the_key_is_not_sent_to_a_third_origin(monkeypatch, server, second_serve
 
 def test_a_failing_run_raises_the_sdk_exception_not_the_protocol_one(server) -> None:
     server.state.model_run_error = (404, "not_found")
-    with Comfy() as client:
+    with Turbine(router_base_url=server.base_url) as client:
         with pytest.raises(NotFound):
             client.models.run(MODEL, ARGS)
 
 
 async def test_a_failing_async_run_raises_the_sdk_exception(server) -> None:
     server.state.model_run_error = (401, "unauthorized")
-    async with AsyncComfy() as client:
+    async with AsyncTurbine(router_base_url=server.base_url) as client:
         with pytest.raises(Unauthorized):
             await client.models.run(MODEL, ARGS)
 
@@ -535,8 +514,8 @@ def test_an_unmapped_failure_still_lands_as_a_comfy_error(server) -> None:
     # before raising. What is under test here is the mapping, not the policy —
     # tests/test_models_run_retry.py covers the retrying half.
     server.state.model_run_error = (503, "model_unavailable")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.code == "model_unavailable"
     assert excinfo.value.http_status == 503
@@ -549,8 +528,8 @@ def test_an_unmapped_failure_still_lands_as_a_comfy_error(server) -> None:
 # on `X-Comfy-Error-Type` -- that body carries no `error_type` of its own. The
 # entries are the only place the provider-level reason survives, and
 # `RouterError.errors` is documented as populated whenever the response carried
-# them. Getting there means crossing the layer boundary: `comfy_low` decodes
-# the response but may not import `comfy_sdk`, so it carries the entries raw
+# them. Getting there means crossing the layer boundary: `turbine_low` decodes
+# the response but may not import `turbine_sdk`, so it carries the entries raw
 # and `to_sdk_error` types them.
 
 #: Two failing fields, the shape `spec/router-openapi.yaml` documents.
@@ -602,7 +581,7 @@ def _assert_validation_surface(exc: InvalidInput) -> None:
 
 def test_a_per_field_validation_failure_populates_errors(server) -> None:
     server.state.model_run_validation_detail = VALIDATION_DETAIL
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(InvalidInput) as excinfo:
             client.models.run(MODEL, ARGS)
     _assert_validation_surface(excinfo.value)
@@ -610,7 +589,7 @@ def test_a_per_field_validation_failure_populates_errors(server) -> None:
 
 async def test_an_async_per_field_validation_failure_populates_errors_too(server) -> None:
     server.state.model_run_validation_detail = VALIDATION_DETAIL
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(InvalidInput) as excinfo:
             await client.models.run(MODEL, ARGS)
     _assert_validation_surface(excinfo.value)
@@ -622,7 +601,7 @@ def test_a_validation_body_of_non_mappings_degrades_and_never_raises(server) -> 
     # the status -- decoding an error response must never replace a diagnosable
     # failure with an undiagnosable one.
     server.state.model_run_validation_detail = [1, "x"]
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(InvalidInput) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.errors == ()
@@ -646,7 +625,7 @@ def test_the_run_and_queued_paths_agree_on_one_validation_body(server) -> None:
     # produce one set of entries, or a caller's branch works on `submit()` and
     # silently does not on `run()`.
     server.state.model_run_validation_detail = VALIDATION_DETAIL
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(InvalidInput) as excinfo:
             client.models.run(MODEL, ARGS)
     queued = error_from_completion(
@@ -678,15 +657,15 @@ def test_a_hostile_string_detail_reaches_the_caller_bounded_and_printable(server
     """
     import unicodedata
 
-    from comfy_low.errors import _BODY_EXCERPT_LIMIT
-    from comfy_sdk.router_exceptions import ProviderError
+    from turbine_low.errors import _BODY_EXCERPT_LIMIT
+    from turbine_sdk.router_exceptions import ProviderError
 
     hostile = "\x1b[31mBAD\x1b[0m\n\u202ereversed\x00" + "x" * 10_000
     server.state.model_run_router_error_shape = True
     server.state.model_run_error = (502, "provider_error")
     server.state.model_run_error_detail = hostile
 
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         with pytest.raises(ProviderError) as excinfo:
             client.models.run(MODEL, ARGS)
 
@@ -766,8 +745,8 @@ def test_a_deadline_exceeded_504_exposes_the_exact_auto_minted_key(server) -> No
     # the generation may well have completed and been billed, and this
     # attribute is the caller's only route back to it.
     server.state.model_run_error = (504, "deadline_exceeded")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     (sent,) = server.state.model_run_idempotency_keys
     assert sent is not None
@@ -779,8 +758,8 @@ def test_a_deadline_exceeded_504_exposes_the_exact_auto_minted_key(server) -> No
 
 async def test_an_async_deadline_exceeded_504_exposes_the_key_too(server) -> None:
     server.state.model_run_error = (504, "deadline_exceeded")
-    async with AsyncComfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.models.run(MODEL, ARGS)
     (sent,) = server.state.model_run_idempotency_keys
     assert sent is not None
@@ -789,8 +768,8 @@ async def test_an_async_deadline_exceeded_504_exposes_the_key_too(server) -> Non
 
 def test_a_caller_supplied_key_round_trips_onto_the_exception(server) -> None:
     server.state.model_run_error = (504, "deadline_exceeded")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS, idempotency_key="caller-chosen-03")
     assert excinfo.value.idempotency_key == "caller-chosen-03"
     assert server.state.model_run_idempotency_keys == ["caller-chosen-03"]
@@ -798,8 +777,8 @@ def test_a_caller_supplied_key_round_trips_onto_the_exception(server) -> None:
 
 async def test_a_caller_supplied_key_round_trips_on_the_async_client(server) -> None:
     server.state.model_run_error = (504, "deadline_exceeded")
-    async with AsyncComfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.models.run(MODEL, ARGS, idempotency_key="caller-chosen-04")
     assert excinfo.value.idempotency_key == "caller-chosen-04"
 
@@ -816,8 +795,8 @@ def test_the_replay_idiom_from_the_docstring_collects_the_generation(server) -> 
     # which is the double charge this feature exists to avoid — so the run
     # counter below is the assertion that actually holds the contract.
     server.state.model_run_replays_lost_result = True
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
         replayed = client.models.run(MODEL, ARGS, idempotency_key=excinfo.value.idempotency_key)
     assert replayed == server.state.model_run_result
@@ -837,8 +816,8 @@ def test_replaying_without_the_key_would_start_a_second_generation(server) -> No
     # bills a second generation. Asserted so the guard is not quietly dropped.
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_replays_lost_result = True
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError):
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError):
             client.models.run(MODEL, ARGS)
         server.state.model_run_error = None
         client.models.run(MODEL, ARGS)
@@ -851,16 +830,16 @@ def test_a_transport_level_failure_carries_the_key() -> None:
     # No response at all, so nothing to translate — and the case the replay
     # contract names alongside the 504, since a connection dropped mid-run says
     # nothing about whether the generation ran.
-    models, low = _models_over(httpx.ConnectError("connection refused"))
-    with pytest.raises(httpx.ConnectError) as excinfo:
+    models, low = _models_over(httpx2.ConnectError("connection refused"))
+    with pytest.raises(httpx2.ConnectError) as excinfo:
         models.run(MODEL, ARGS)
     assert low.keys == [excinfo.value.idempotency_key]  # type: ignore[attr-defined]
     assert excinfo.value.idempotency_key is not None  # type: ignore[attr-defined]
 
 
 async def test_an_async_transport_level_failure_carries_the_key() -> None:
-    models, low = _async_models_over(httpx.ReadTimeout("no answer"))
-    with pytest.raises(httpx.ReadTimeout) as excinfo:
+    models, low = _async_models_over(httpx2.ReadTimeout("no answer"))
+    with pytest.raises(httpx2.ReadTimeout) as excinfo:
         await models.run(MODEL, ARGS)
     assert low.keys == [excinfo.value.idempotency_key]  # type: ignore[attr-defined]
 
@@ -869,8 +848,8 @@ def test_a_client_side_timeout_against_a_live_server_carries_the_key(server) -> 
     # The read timeout the retry module calls the important member of the
     # unknown-outcome class: the server is most likely still generating.
     server.state.model_run_delay = 0.4
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(httpx.TimeoutException) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(httpx2.TimeoutException) as excinfo:
             client.models.run(MODEL, ARGS, timeout=0.05)
     (sent,) = server.state.model_run_idempotency_keys
     assert excinfo.value.idempotency_key == sent  # type: ignore[attr-defined]
@@ -907,8 +886,8 @@ def test_the_key_on_the_exception_is_the_one_every_retry_reused(server) -> None:
     policy = RetryPolicy(
         max_elapsed=0.5, initial_backoff=0.01, max_backoff=0.02, retry_possibly_in_flight=True
     )
-    with Comfy(retry=policy) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=policy, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     sent = server.state.model_run_idempotency_keys
     assert len(sent) > 1
@@ -921,8 +900,8 @@ def test_the_key_on_the_exception_is_the_one_every_retry_reused(server) -> None:
 def test_a_failed_run_carries_the_servers_request_id(server) -> None:
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_request_id = "req_abc123"
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.request_id == "req_abc123"
 
@@ -930,16 +909,16 @@ def test_a_failed_run_carries_the_servers_request_id(server) -> None:
 async def test_an_async_failed_run_carries_the_servers_request_id(server) -> None:
     server.state.model_run_error = (500, "internal_error")
     server.state.model_run_request_id = "req_def456"
-    async with AsyncComfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             await client.models.run(MODEL, ARGS)
     assert excinfo.value.request_id == "req_def456"
 
 
 def test_request_id_is_none_when_the_response_named_none(server) -> None:
     server.state.model_run_error = (504, "deadline_exceeded")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.request_id is None
     # The key is still there — the two are independent, and the one that
@@ -949,19 +928,19 @@ def test_request_id_is_none_when_the_response_named_none(server) -> None:
 
 def test_request_id_reads_as_none_on_a_failure_with_no_response_at_all() -> None:
     # The documented pair has to be uniform on exactly the failures it is most
-    # needed on. `httpx.ConnectError` is not one of this SDK's classes and
+    # needed on. `httpx2.ConnectError` is not one of this SDK's classes and
     # declares no `request_id`, so without the stamp defaulting it, the
     # attribute access the docs invite would raise AttributeError here.
-    models, _ = _models_over(httpx.ConnectError("connection refused"))
-    with pytest.raises(httpx.ConnectError) as excinfo:
+    models, _ = _models_over(httpx2.ConnectError("connection refused"))
+    with pytest.raises(httpx2.ConnectError) as excinfo:
         models.run(MODEL, ARGS)
     assert excinfo.value.request_id is None  # type: ignore[attr-defined]
     assert excinfo.value.idempotency_key is not None  # type: ignore[attr-defined]
 
 
 async def test_an_async_transport_failure_reads_request_id_as_none() -> None:
-    models, _ = _async_models_over(httpx.ReadTimeout("no answer"))
-    with pytest.raises(httpx.ReadTimeout) as excinfo:
+    models, _ = _async_models_over(httpx2.ReadTimeout("no answer"))
+    with pytest.raises(httpx2.ReadTimeout) as excinfo:
         await models.run(MODEL, ARGS)
     assert excinfo.value.request_id is None  # type: ignore[attr-defined]
 
@@ -971,8 +950,8 @@ def test_a_stamped_error_that_already_has_a_request_id_keeps_it(server) -> None:
     # thing a user quotes in a support request.
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_request_id = "req_keepme"
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.request_id == "req_keepme"
 
@@ -987,16 +966,16 @@ def test_a_504_forwards_the_retry_after_the_server_named(server) -> None:
     # the wait off.
     server.state.model_run_error = (504, "deadline_exceeded")
     server.state.model_run_retry_after = "2"
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.retry_after == 2
 
 
 def test_retry_after_is_none_when_the_server_named_no_pace(server) -> None:
     server.state.model_run_error = (504, "deadline_exceeded")
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.retry_after is None
 
@@ -1005,8 +984,8 @@ def test_retry_after_reads_as_none_on_a_failure_with_no_response() -> None:
     # The README's table promises all three attributes read rather than raise
     # on anything `models.run` raises, and a transport failure is the case that
     # is neither one of this SDK's classes nor a response.
-    models, _ = _models_over(httpx.ConnectError("connection refused"))
-    with pytest.raises(httpx.ConnectError) as excinfo:
+    models, _ = _models_over(httpx2.ConnectError("connection refused"))
+    with pytest.raises(httpx2.ConnectError) as excinfo:
         models.run(MODEL, ARGS)
     assert excinfo.value.retry_after is None  # type: ignore[attr-defined]
 
@@ -1036,8 +1015,8 @@ def test_an_undecodable_success_body_is_a_stamped_sdk_error(server) -> None:
     # is exactly the case the key has to ride out on, so it must not escape as
     # the raw json.JSONDecodeError from outside the translated surface.
     server.state.model_run_undecodable_body = True
-    with Comfy(retry=NO_RETRY) as client:
-        with pytest.raises(ComfyError) as excinfo:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
+        with pytest.raises(TurbineError) as excinfo:
             client.models.run(MODEL, ARGS)
     assert excinfo.value.idempotency_key is not None
     assert excinfo.value.http_status == 200
@@ -1121,7 +1100,7 @@ def test_run_detailed_reports_a_replay_off_a_real_replayed_response(server) -> N
     the stub answers a re-sent key the way the contract says Router does, so
     the name has to match something the SDK did not choose.
     """
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         key = "replay-name-pin"
         server.state.model_run_replay_store[key] = (server.state.model_run_result, None, None)
         got = client.models.run_detailed(MODEL, ARGS, idempotency_key=key)
@@ -1134,7 +1113,7 @@ def test_a_replayed_run_can_report_its_credits_too(server) -> None:
     # meaningful on this one response, so pin the combination rather than
     # assuming the two lifts compose.
     server.state.model_run_response_headers = {"X-Comfy-Credits-Used": "0"}
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         key = "replay-with-credits"
         server.state.model_run_replay_store[key] = (server.state.model_run_result, None, None)
         got = client.models.run_detailed(MODEL, ARGS, idempotency_key=key)
@@ -1197,14 +1176,14 @@ def test_run_detailed_keeps_a_reported_zero_distinguishable_from_an_absent_one()
 
 
 def test_run_detailed_carries_the_credits_header_off_a_real_response(server) -> None:
-    """The unit stubs hand back a plain dict; a real run hands back httpx.Headers.
+    """The unit stubs hand back a plain dict; a real run hands back httpx2.Headers.
 
     Worth its own pass over the wire: the lift reads one exact header name off
     whatever ``post_model_run`` returned, and a stub dict would answer the same
     way whether or not the name survives a real HTTP round trip.
     """
     server.state.model_run_response_headers = {"X-Comfy-Credits-Used": "1.25"}
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         assert client.models.run_detailed(MODEL, ARGS).credits_used == "1.25"
 
 
@@ -1213,7 +1192,7 @@ async def test_async_run_detailed_carries_the_credits_header_too(server) -> None
     # the async client reaches it down its own transport — so the parity is
     # asserted rather than assumed.
     server.state.model_run_response_headers = {"X-Comfy-Credits-Used": "1.25"}
-    async with AsyncComfy(retry=NO_RETRY) as client:
+    async with AsyncTurbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         got = await client.models.run_detailed(MODEL, ARGS)
     assert got.credits_used == "1.25"
 
@@ -1241,7 +1220,7 @@ def test_credits_used_is_optional_so_the_public_shape_stays_constructible() -> N
     [
         "",  # header sent empty
         "   ",  # whitespace only
-        "1.25, 1.25",  # repeated header, joined by httpx.Headers.get
+        "1.25, 1.25",  # repeated header, joined by httpx2.Headers.get
         "NaN",  # Decimal accepts it silently, then poisons every comparison
         "Infinity",
         "-Infinity",
@@ -1272,5 +1251,5 @@ def test_run_detailed_hands_a_usable_credits_value_over_untouched() -> None:
 def test_an_ordinary_unstamped_run_over_the_wire_reports_no_credits(server) -> None:
     # The server stamps nothing, which is the common case today. Nothing in the
     # lift may invent a value for it.
-    with Comfy(retry=NO_RETRY) as client:
+    with Turbine(retry=NO_RETRY, router_base_url=server.base_url) as client:
         assert client.models.run_detailed(MODEL, ARGS).credits_used is None
