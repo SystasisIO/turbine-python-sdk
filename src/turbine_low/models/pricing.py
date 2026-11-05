@@ -23,7 +23,7 @@ class Money(_PricingModel):
 
     amount: Annotated[str, Field(pattern=r"^[0-9]+$")]
     precision: Annotated[int, Field(ge=0)]
-    unit: str
+    unit: Annotated[str, Field(min_length=1)]
 
     @field_validator("amount")
     @classmethod
@@ -36,8 +36,8 @@ class Money(_PricingModel):
 class NodeEstimate(_PricingModel):
     """The known preview price of one node, with its optional model identity."""
 
-    node_id: str
-    model_id: str | None
+    node_id: Annotated[str, Field(min_length=1)]
+    model_id: Annotated[str, Field(min_length=1)] | None
     price: Money
 
 

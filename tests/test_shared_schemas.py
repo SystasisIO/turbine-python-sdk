@@ -56,6 +56,72 @@ def test_money_precision_is_a_nonnegative_integer_not_boolean(precision: object)
         Money(amount="1", precision=precision, unit="USD")
 
 
+@pytest.mark.parametrize("validate_json", [False, True])
+@pytest.mark.parametrize(
+    "model,body,field",
+    [
+        (Money, {"amount": "1", "precision": 0, "unit": ""}, "unit"),
+        (
+            NodeEstimate,
+            {
+                "node_id": "",
+                "model_id": None,
+                "price": {"amount": "1", "precision": 0, "unit": "x"},
+            },
+            "node_id",
+        ),
+        (
+            NodeEstimate,
+            {
+                "node_id": "1",
+                "model_id": "",
+                "price": {"amount": "1", "precision": 0, "unit": "x"},
+            },
+            "model_id",
+        ),
+    ],
+)
+def test_pricing_strings_cannot_be_empty(model, body, field, validate_json: bool) -> None:
+    with pytest.raises(ValidationError) as exc:
+        if validate_json:
+            model.model_validate_json(json.dumps(body))
+        else:
+            model.model_validate(body)
+    assert [(error["loc"], error["type"]) for error in exc.value.errors()] == [
+        ((field,), "string_too_short")
+    ]
+
+
+@pytest.mark.parametrize("value", ["x", " ", " custom/модель "])
+@pytest.mark.parametrize("null_model", [False, True])
+def test_pricing_strings_roundtrip_without_normalization(value: str, null_model: bool) -> None:
+    body = {
+        "node_id": value,
+        "model_id": None if null_model else value,
+        "price": {"amount": "1", "precision": 0, "unit": value},
+    }
+    estimate = NodeEstimate.model_validate(body)
+    assert estimate.model_dump(mode="json") == body
+    assert json.loads(estimate.model_dump_json()) == body
+    assert NodeEstimate.model_validate_json(estimate.model_dump_json()) == estimate
+
+
+@pytest.mark.parametrize("mode", ["validation", "serialization"])
+def test_pricing_json_schemas_require_nonempty_strings_and_allow_null_model(mode: str) -> None:
+    for model, field in [(Money, "unit"), (NodeEstimate, "node_id")]:
+        schema = model.model_json_schema(mode=mode)
+        property_schema = schema["properties"][field]
+        assert property_schema["type"] == "string"
+        assert property_schema["minLength"] == 1
+        assert field in schema["required"]
+        assert "default" not in property_schema
+    node_schema = NodeEstimate.model_json_schema(mode=mode)
+    model_schema = node_schema["properties"]["model_id"]
+    assert model_schema["anyOf"] == [{"type": "string", "minLength": 1}, {"type": "null"}]
+    assert "model_id" in node_schema["required"]
+    assert "default" not in model_schema
+
+
 @pytest.mark.parametrize(
     "model,body,required",
     [

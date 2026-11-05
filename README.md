@@ -154,6 +154,7 @@ composition in another Pydantic response model without copying DTO definitions.
 ```
 
 Money amounts are nonnegative integer strings, without float conversion.
+`unit`, `node_id` and non-null `model_id` are nonempty strings.
 `total` may be null, including when some node prices are known; `model_id` may
 be null. Nullable fields are still required. Unknown estimates are never
 converted to zero. SDK does not apply markup, convert units or authorize spend.

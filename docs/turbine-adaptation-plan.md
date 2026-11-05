@@ -223,8 +223,8 @@ JSON-граф `PromptGraph`, без Asset handles. Неподготовленн�
 
 | Схема | Поля |
 | --- | --- |
-| `Money` | `amount`: строка неотрицательного целого; `precision`: целое ≥ 0; `unit`: строка |
-| `NodeEstimate` | `node_id`: строка; `model_id`: строка или null; `price`: `Money` |
+| `Money` | `amount`: строка неотрицательного целого; `precision`: целое ≥ 0; `unit`: непустая строка |
+| `NodeEstimate` | `node_id`: непустая строка; `model_id`: непустая строка или null; `price`: `Money` |
 | `EstimateRequest` | `prompt`: `PromptGraph` |
 | `EstimateReply` | `total`: `Money` или null; `nodes`: список `NodeEstimate`; `breakdown_complete`: bool |
 
