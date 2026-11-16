@@ -15,12 +15,13 @@ The fork's Python names and transport are independent of those wire contracts.
 | Job listing and metadata | Existing SDK supplement | `list_jobs`, submit metadata | Offline pagination/filter tests | NOT_RUN |
 | Router discovery, model calls and queue | Vendored Router contract and existing SDK | Explicitly enabled `models` resource | Offline Router suite and drift checks | NOT_RUN |
 | Native node catalog | Agreed native Comfy object_info response | `client.turbine.nodes.list/get` | Local HTTP stub | NOT_RUN |
+| Service package catalog | TurbineOS service package catalog contract | `client.turbine.packages.snapshot/list/get` | Local HTTP stub and shared schema tests | NOT_RUN |
 | Prepared prompt estimate | Agreed prompt/estimate extension | `client.turbine.estimate_prompt` | Local HTTP stub and shared schema tests | NOT_RUN |
 
 The local stub establishes SDK request/response behavior, not server readiness.
 No real provider calls, generations or billing are part of offline acceptance.
-Package catalog, financial admission, final charges/refunds and native frontend
-HTTP/WebSocket conversion remain outside this SDK iteration.
+Financial admission, final charges and refunds, and native frontend
+HTTP/WebSocket conversion have separate contracts.
 
 ## Consumer contract
 
@@ -40,7 +41,7 @@ HTTP/WebSocket conversion remain outside this SDK iteration.
 
 ## Verification record
 
-Local acceptance completed on 2026-11-05. The full suite was run with four
+Baseline acceptance completed on 2026-11-05. The full suite was run with four
 isolated pytest workers; xdist was installed only in temporary verification
 environments and is not an SDK dependency.
 
@@ -70,6 +71,19 @@ parallel, install pytest-xdist in an isolated test environment and use
 `python -m pytest -n 4 -q`. CI also installs the built wheel and runs the shared
 schema, native-extension and public-consumer tests from a temporary directory
 outside the checkout. No editable SDK installation or PYTHONPATH is used there.
+
+### Service catalog and estimate row identity
+
+Local macOS verification on 2026-11-17 covered the service catalog and the
+required package and operation identities in estimate rows.
+
+| Environment / check | Result |
+| --- | --- |
+| Python 3.12.11, full SDK suite | 1579 passed, 9 environment-gated integrations skipped |
+| Python 3.11.18, Pydantic 2.6.0, blake3 0.4.0 and HTTPX2 2.16.0 | 246 package, shared schema and native extension tests passed |
+| Python 3.12.11, installed wheel outside checkout | 248 package, shared schema, native extension and public consumer tests passed |
+| Ruff lint and format, mypy, codegen drift and public repository hygiene | Passed |
+| Wheel, source distribution and wheel rebuilt from that distribution | Built successfully. Metadata and wheel contents verified |
 
 ## Remaining server dependencies
 

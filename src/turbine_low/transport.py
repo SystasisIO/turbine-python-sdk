@@ -53,34 +53,40 @@ import asyncio
 import platform
 import secrets
 import sys
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
-from typing import Annotated, Any, BinaryIO, NoReturn, cast
+from typing import Annotated, Any, BinaryIO, NoReturn, TypeVar, cast
 from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import httpx2
-from pydantic import BeforeValidator, create_model
+from pydantic import BaseModel, BeforeValidator, create_model
 
 from . import _multipart
 from .errors import ApiError, clean_body_excerpt, clean_request_id, error_from_envelope
 from .extension_transport import (
+    catalog_package_url,
+    catalog_page_url,
+    catalog_snapshot_url,
     estimate_url,
     node_catalog_url,
+    parse_catalog_response,
     parse_native_response,
     prepare_estimate,
 )
 from .models import Asset, Job, JobWorkflowResponse
 from .models.catalog import NodeCatalog
 from .models.graph import PromptGraph
+from .models.packages import CATALOG_DEFAULT_LIMIT, CatalogSnapshot, Package, PackagePage
 from .models.pricing import EstimateReply
 from .sse import RawEvent, SSEDecoder
 
 _API = "/api/v2"
 _UNSET = object()
+_CatalogResult = TypeVar("_CatalogResult", bound=BaseModel)
 
 # SSE read-idle timeout. The server sends keepalive comments roughly every 15s,
 # so no data at all for ~3x that means the connection has silently stalled
@@ -708,6 +714,7 @@ class _Prepared:
         content: Any,
         timeout: Any,
         external: bool,
+        exact_query: bool,
     ) -> tuple[httpx2.Request, Any]:
         kw: dict[str, Any] = {}
         if timeout is not _UNSET:
@@ -716,6 +723,9 @@ class _Prepared:
         request = client.build_request(
             method, url, headers=self.headers(url, headers), json=json, content=content, **kw
         )
+        if exact_query:
+            # A borrowed client's default query params otherwise replace the URL query.
+            request.url = httpx2.URL(url)
         trusted = origin(url) in (self._base_origin, self._router_origin)
         if external or not trusted:
             # build_request merges default headers; removing it before that
@@ -1161,6 +1171,7 @@ class TurbineLow:
         timeout: Any = _UNSET,
         follow_redirects: bool | None = None,
         _external: bool = False,
+        _exact_query: bool = False,
     ) -> Iterator[httpx2.Response]:
         """Stream a response and close every hop on success, failure or cancellation."""
         request, auth = self._p.prepare_request(
@@ -1172,6 +1183,7 @@ class TurbineLow:
             content=content,
             timeout=timeout,
             external=_external,
+            exact_query=_exact_query,
         )
         follow = self._client.follow_redirects if follow_redirects is None else follow_redirects
         history: list[httpx2.Response] = []
@@ -1239,6 +1251,58 @@ class TurbineLow:
             EstimateReply,
             retry_after=_retry_after(response),
             request_id=_request_id(response),
+        )
+
+    def _get_catalog(
+        self,
+        url: str,
+        model: type[_CatalogResult],
+        *,
+        timeout: Any,
+        matches_request: Callable[[_CatalogResult], bool] | None = None,
+    ) -> _CatalogResult:
+        with self.open(
+            "GET", url, timeout=timeout, follow_redirects=False, _exact_query=True
+        ) as response:
+            response.read()
+            return parse_catalog_response(
+                response, model, retry_after=_retry_after(response), matches_request=matches_request
+            )
+
+    def get_catalog_snapshot(self, *, timeout: Any = _UNSET) -> CatalogSnapshot:
+        return self._get_catalog(
+            catalog_snapshot_url(self.base_url), CatalogSnapshot, timeout=timeout
+        )
+
+    def list_catalog_packages(
+        self,
+        *,
+        catalog_revision: str,
+        cursor: str | None = None,
+        limit: int = CATALOG_DEFAULT_LIMIT,
+        timeout: Any = _UNSET,
+    ) -> PackagePage:
+        url = catalog_page_url(
+            self.base_url, catalog_revision=catalog_revision, cursor=cursor, limit=limit
+        )
+        return self._get_catalog(
+            url,
+            PackagePage,
+            timeout=timeout,
+            matches_request=lambda page: (
+                page.catalog_revision == catalog_revision and len(page.data) <= limit
+            ),
+        )
+
+    def get_catalog_package(
+        self, package_hash: str, *, catalog_revision: str, timeout: Any = _UNSET
+    ) -> Package:
+        url = catalog_package_url(self.base_url, package_hash, catalog_revision=catalog_revision)
+        return self._get_catalog(
+            url,
+            Package,
+            timeout=timeout,
+            matches_request=lambda package: package.reference.digest == package_hash,
         )
 
     def post_assets(
@@ -1772,6 +1836,7 @@ class AsyncTurbineLow:
         timeout: Any = _UNSET,
         follow_redirects: bool | None = None,
         _external: bool = False,
+        _exact_query: bool = False,
     ) -> AsyncIterator[httpx2.Response]:
         """Stream a response and close every hop on success, failure or cancellation."""
         request, auth = self._p.prepare_request(
@@ -1783,6 +1848,7 @@ class AsyncTurbineLow:
             content=content,
             timeout=timeout,
             external=_external,
+            exact_query=_exact_query,
         )
         follow = self._client.follow_redirects if follow_redirects is None else follow_redirects
         history: list[httpx2.Response] = []
@@ -1854,6 +1920,58 @@ class AsyncTurbineLow:
             EstimateReply,
             retry_after=_retry_after(response),
             request_id=_request_id(response),
+        )
+
+    async def _get_catalog(
+        self,
+        url: str,
+        model: type[_CatalogResult],
+        *,
+        timeout: Any,
+        matches_request: Callable[[_CatalogResult], bool] | None = None,
+    ) -> _CatalogResult:
+        async with self.open(
+            "GET", url, timeout=timeout, follow_redirects=False, _exact_query=True
+        ) as response:
+            await response.aread()
+            return parse_catalog_response(
+                response, model, retry_after=_retry_after(response), matches_request=matches_request
+            )
+
+    async def get_catalog_snapshot(self, *, timeout: Any = _UNSET) -> CatalogSnapshot:
+        return await self._get_catalog(
+            catalog_snapshot_url(self.base_url), CatalogSnapshot, timeout=timeout
+        )
+
+    async def list_catalog_packages(
+        self,
+        *,
+        catalog_revision: str,
+        cursor: str | None = None,
+        limit: int = CATALOG_DEFAULT_LIMIT,
+        timeout: Any = _UNSET,
+    ) -> PackagePage:
+        url = catalog_page_url(
+            self.base_url, catalog_revision=catalog_revision, cursor=cursor, limit=limit
+        )
+        return await self._get_catalog(
+            url,
+            PackagePage,
+            timeout=timeout,
+            matches_request=lambda page: (
+                page.catalog_revision == catalog_revision and len(page.data) <= limit
+            ),
+        )
+
+    async def get_catalog_package(
+        self, package_hash: str, *, catalog_revision: str, timeout: Any = _UNSET
+    ) -> Package:
+        url = catalog_package_url(self.base_url, package_hash, catalog_revision=catalog_revision)
+        return await self._get_catalog(
+            url,
+            Package,
+            timeout=timeout,
+            matches_request=lambda package: package.reference.digest == package_hash,
         )
 
     async def post_assets(

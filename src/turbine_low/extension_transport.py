@@ -1,29 +1,49 @@
-"""Sans-IO URL, payload and response helpers for the three native extensions."""
+"""Sans-IO URL, payload and response helpers for TurbineOS extensions."""
 
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any, TypeVar
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx2
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from .errors import ApiError, clean_body_excerpt, error_from_envelope, summarise_detail
+from .errors import (
+    ApiError,
+    CatalogSnapshotExpired,
+    clean_body_excerpt,
+    clean_request_id,
+    error_from_envelope,
+    summarise_detail,
+)
+from .models._scalars import Sha256Digest
 from .models.graph import PromptGraph
+from .models.packages import CatalogLimit, CatalogToken
 from .models.pricing import EstimateRequest
 
 NODES_PATH = "/api/object_info"
 ESTIMATE_PATH = "/api/prompt/estimate"
+CATALOG_PATH = "/api/broker/v1/catalog"
+PACKAGES_PATH = CATALOG_PATH + "/packages"
 EXTENSION_ROUTES = (
     ("GET", NODES_PATH),
     ("GET", NODES_PATH + "/{class_type}"),
     ("POST", ESTIMATE_PATH),
+    ("GET", CATALOG_PATH),
+    ("GET", PACKAGES_PATH),
+    ("GET", PACKAGES_PATH + "/{package_hash}"),
 )
 
 _Model = TypeVar("_Model", bound=BaseModel)
+_Parameter = TypeVar("_Parameter")
+_ErrorParser = Callable[[httpx2.Response, Any, int | None, str | None], ApiError]
 _CODE = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 _BEARER = re.compile(r"\bBearer[ \t]+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+_TOKEN: TypeAdapter[str] = TypeAdapter(CatalogToken)
+_LIMIT: TypeAdapter[int] = TypeAdapter(CatalogLimit)
+_DIGEST: TypeAdapter[str] = TypeAdapter(Sha256Digest)
 
 
 class _AllNodes:
@@ -48,12 +68,14 @@ def _request_secrets(resp: httpx2.Response) -> tuple[str, ...]:
     return tuple(secrets)
 
 
-def _safe_text(value: Any, secrets: tuple[str, ...]) -> str | None:
-    if not isinstance(value, str):
-        return None
+def _redact_secrets(value: str, secrets: tuple[str, ...]) -> str:
     for secret in secrets:
         value = value.replace(secret, "[redacted]")
-    return clean_body_excerpt(_BEARER.sub("Bearer [redacted]", value))
+    return _BEARER.sub("Bearer [redacted]", value)
+
+
+def _safe_text(value: Any, secrets: tuple[str, ...]) -> str | None:
+    return clean_body_excerpt(_redact_secrets(value, secrets)) if isinstance(value, str) else None
 
 
 def node_catalog_url(base_url: str, class_type: str | _AllNodes = _ALL_NODES) -> str:
@@ -73,6 +95,35 @@ def estimate_url(base_url: str) -> str:
     return base_url.rstrip("/") + ESTIMATE_PATH
 
 
+def catalog_snapshot_url(base_url: str) -> str:
+    return base_url.rstrip("/") + CATALOG_PATH
+
+
+def _catalog_parameter(name: str, value: object, adapter: TypeAdapter[_Parameter]) -> _Parameter:
+    try:
+        return adapter.validate_python(value, strict=True)
+    except ValidationError:
+        raise ValueError(f"Invalid {name}") from None
+
+
+def catalog_page_url(
+    base_url: str, *, catalog_revision: str, cursor: str | None, limit: int
+) -> str:
+    params = {"catalog_revision": _catalog_parameter("catalog_revision", catalog_revision, _TOKEN)}
+    if cursor is not None:
+        params["cursor"] = _catalog_parameter("cursor", cursor, _TOKEN)
+    params["limit"] = str(_catalog_parameter("limit", limit, _LIMIT))
+    query = urlencode(params, quote_via=quote)
+    return f"{base_url.rstrip('/')}{PACKAGES_PATH}?{query}"
+
+
+def catalog_package_url(base_url: str, package_hash: str, *, catalog_revision: str) -> str:
+    digest = _catalog_parameter("package_hash", package_hash, _DIGEST)
+    revision = _catalog_parameter("catalog_revision", catalog_revision, _TOKEN)
+    query = urlencode({"catalog_revision": revision}, quote_via=quote)
+    return f"{base_url.rstrip('/')}{PACKAGES_PATH}/{digest}?{query}"
+
+
 def prepare_estimate(prompt: PromptGraph | dict[str, Any]) -> dict[str, Any]:
     """Validate the whole graph before HTTP, including an existing mutable model."""
     prepared = PromptGraph.model_validate(prompt)
@@ -83,7 +134,7 @@ def _safe_details(value: Any, secrets: tuple[str, ...]) -> Any:
     """Keep native validation details without echoing credential-bearing keys."""
     if isinstance(value, dict):
         return {
-            key: (
+            _redact_secrets(key, secrets): (
                 "[redacted]"
                 if key.lower().replace("-", "_")
                 in {"authorization", "api_key", "token", "password", "cookie", "set_cookie"}
@@ -101,7 +152,6 @@ def _safe_details(value: Any, secrets: tuple[str, ...]) -> Any:
 def _native_error(
     resp: httpx2.Response,
     body: Any,
-    *,
     retry_after: int | None,
     request_id: str | None,
 ) -> ApiError:
@@ -147,6 +197,75 @@ def _native_error(
     )
 
 
+def _catalog_error(
+    resp: httpx2.Response,
+    body: Any,
+    retry_after: int | None,
+    request_id: str | None,
+) -> ApiError:
+    if not isinstance(body, dict):
+        return _native_error(resp, body, retry_after, request_id)
+    secrets = _request_secrets(resp)
+    request_id = request_id or clean_request_id(_safe_text(body.get("request_id"), secrets))
+    code = _safe_text(body.get("code"), secrets)
+    if code is None or _CODE.fullmatch(code) is None:
+        return _native_error(resp, body, retry_after, request_id)
+    error_type = (
+        CatalogSnapshotExpired
+        if resp.status_code == 410 and code == CatalogSnapshotExpired.code
+        else ApiError
+    )
+    details = body.get("details")
+    return error_type(
+        _safe_text(body.get("message"), secrets) or f"HTTP {resp.status_code} from package catalog",
+        code=code,
+        http_status=resp.status_code,
+        request_id=request_id,
+        retry_after=retry_after,
+        details=_safe_details(details, secrets) if isinstance(details, dict) else None,
+    )
+
+
+def _parse_extension_response(
+    resp: httpx2.Response,
+    model: type[_Model],
+    *,
+    name: str,
+    error_parser: _ErrorParser,
+    retry_after: int | None,
+    request_id: str | None,
+    matches_request: Callable[[_Model], bool] | None = None,
+) -> _Model:
+    try:
+        body = resp.json()
+    except (ValueError, RecursionError):
+        if resp.status_code != 200:
+            raise error_parser(resp, None, retry_after, request_id) from None
+        raise ApiError(
+            f"{name} returned malformed JSON",
+            code="invalid_json_response",
+            http_status=resp.status_code,
+            request_id=request_id,
+        ) from None
+    if resp.status_code != 200:
+        raise error_parser(resp, body, retry_after, request_id)
+    try:
+        result = model.model_validate(body)
+    except (ValidationError, RecursionError):
+        pass
+    else:
+        if matches_request is None or matches_request(result):
+            return result
+    # The schema name identifies the fault without copying response values.
+    raise ApiError(
+        f"{name} response does not match {model.__name__}",
+        code="invalid_schema_response",
+        http_status=resp.status_code,
+        request_id=request_id,
+        details={"schema": model.__name__},
+    )
+
+
 def parse_native_response(
     resp: httpx2.Response,
     model: type[_Model],
@@ -155,41 +274,49 @@ def parse_native_response(
     request_id: str | None = None,
 ) -> _Model:
     """Read native errors and distinguish invalid JSON from a wrong schema."""
-    try:
-        body = resp.json()
-    except ValueError:
-        if resp.status_code != 200:
-            raise _native_error(
-                resp, None, retry_after=retry_after, request_id=request_id
-            ) from None
-        raise ApiError(
-            "Native extension returned malformed JSON",
-            code="invalid_json_response",
-            http_status=resp.status_code,
-            request_id=request_id,
-        ) from None
-    if resp.status_code != 200:
-        raise _native_error(resp, body, retry_after=retry_after, request_id=request_id)
-    try:
-        return model.model_validate(body)
-    except ValidationError:
-        # Do not chain Pydantic's input-bearing error or copy response values
-        # into the exception. The route and expected model identify the fault.
-        raise ApiError(
-            f"Native extension response does not match {model.__name__}",
-            code="invalid_schema_response",
-            http_status=resp.status_code,
-            request_id=request_id,
-            details={"schema": model.__name__},
-        ) from None
+    return _parse_extension_response(
+        resp,
+        model,
+        name="Native extension",
+        error_parser=_native_error,
+        retry_after=retry_after,
+        request_id=request_id,
+    )
+
+
+def parse_catalog_response(
+    resp: httpx2.Response,
+    model: type[_Model],
+    *,
+    retry_after: int | None,
+    matches_request: Callable[[_Model], bool] | None,
+) -> _Model:
+    request_id = clean_request_id(
+        _safe_text(resp.headers.get("X-Request-Id"), _request_secrets(resp))
+    )
+    return _parse_extension_response(
+        resp,
+        model,
+        name="Package catalog",
+        error_parser=_catalog_error,
+        retry_after=retry_after,
+        request_id=request_id,
+        matches_request=matches_request,
+    )
 
 
 __all__ = [
+    "CATALOG_PATH",
     "ESTIMATE_PATH",
     "EXTENSION_ROUTES",
     "NODES_PATH",
+    "PACKAGES_PATH",
+    "catalog_package_url",
+    "catalog_page_url",
+    "catalog_snapshot_url",
     "estimate_url",
     "node_catalog_url",
+    "parse_catalog_response",
     "parse_native_response",
     "prepare_estimate",
 ]

@@ -33,13 +33,14 @@ from turbine_sdk import API_KEY_ENV_VAR, BASE_URL_ENV_VAR
 
 @dataclass
 class ServerState:
-    # Native extension knobs, shared by object-info and prompt estimate routes.
+    # TurbineOS extensions use the same server as the v2 routes.
     native_catalog: dict[str, Any] = field(
         default_factory=lambda: {"Example": {"input": {"required": {}}, "output": ["IMAGE"]}}
     )
     native_estimate: dict[str, Any] = field(
         default_factory=lambda: {"total": None, "nodes": [], "breakdown_complete": False}
     )
+    package_catalog_replies: dict[str, dict[str, Any]] = field(default_factory=dict)
     native_deployment_prefix: str = ""
     native_status: int = 200
     native_body: Any = None
@@ -629,6 +630,10 @@ def _make_handler(state: ServerState):
         def do_GET(self) -> None:
             if not self._auth_ok():
                 self._err(401, "unauthorized", "no key")
+                return
+
+            if self.path in state.package_catalog_replies:
+                self._native_reply(state.package_catalog_replies[self.path])
                 return
 
             native_path = urlsplit(self.path).path.removeprefix(state.native_deployment_prefix)

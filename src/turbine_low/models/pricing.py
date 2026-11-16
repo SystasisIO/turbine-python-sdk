@@ -6,6 +6,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ._scalars import Identifier, Sha256Digest
 from .graph import PromptGraph
 
 
@@ -34,9 +35,11 @@ class Money(_PricingModel):
 
 
 class NodeEstimate(_PricingModel):
-    """The known preview price of one node, with its optional model identity."""
+    """The known price of a node with its resolved package, operation, and model."""
 
     node_id: Annotated[str, Field(min_length=1)]
+    package_hash: Sha256Digest
+    operation_id: Identifier
     model_id: Annotated[str, Field(min_length=1)] | None
     price: Money
 

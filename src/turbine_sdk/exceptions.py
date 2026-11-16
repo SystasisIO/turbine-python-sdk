@@ -34,6 +34,7 @@ from typing import Any, TypeVar
 import httpx2
 
 from turbine_low.errors import _CANCEL_REFUSAL_STATUS, ApiError
+from turbine_low.errors import CatalogSnapshotExpired as LowCatalogSnapshotExpired
 from turbine_low.models import JobError
 
 from ._errors import TurbineError
@@ -61,6 +62,10 @@ class MissingApiKey(TurbineError):
 
 class NotFound(TurbineError):
     pass
+
+
+class CatalogSnapshotExpired(TurbineError):
+    """The requested service catalog revision is no longer readable."""
 
 
 class InvalidWorkflow(TurbineError):
@@ -174,6 +179,8 @@ def _class_for(exc: ApiError) -> type[TurbineError]:
     hole on exactly the refusals nobody could have enumerated in advance.
     Anything else stays a bare ``TurbineError`` carrying the original code.
     """
+    if isinstance(exc, LowCatalogSnapshotExpired):
+        return CatalogSnapshotExpired
     cls = _BY_CODE.get(exc.code) or _BY_ERROR_TYPE.get(exc.code)
     if cls is None and exc.http_status == _CANCEL_REFUSAL_STATUS:
         # Gated on the STATUS as well as the code, which the low layer already
@@ -372,6 +379,7 @@ __all__ = [
     "AlreadyCompleted",
     "BlobNotFound",
     "CancelRefused",
+    "CatalogSnapshotExpired",
     "TurbineError",
     "Forbidden",
     "HashMismatch",

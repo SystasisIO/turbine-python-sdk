@@ -145,6 +145,8 @@ composition in another Pydantic response model without copying DTO definitions.
   "nodes": [
     {
       "node_id": "1",
+      "package_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "operation_id": "text.complete",
       "model_id": "example-model",
       "price": {"amount": "48", "precision": 0, "unit": "CREDIT"}
     }
@@ -153,11 +155,52 @@ composition in another Pydantic response model without copying DTO definitions.
 }
 ```
 
-Money amounts are nonnegative integer strings, without float conversion.
-`unit`, `node_id` and non-null `model_id` are nonempty strings.
-`total` may be null, including when some node prices are known; `model_id` may
-be null. Nullable fields are still required. Unknown estimates are never
-converted to zero. SDK does not apply markup, convert units or authorize spend.
+Money amounts are nonnegative integer strings. The SDK returns them in the
+server's unit and precision. `unit` and `node_id` are nonempty strings.
+Each price row requires `package_hash`, the 64-character lowercase SHA-256
+digest from the catalog's `reference.digest`, and `operation_id`, the resolved
+operation's ID within that release. `model_id` is a nonempty string for a
+selected or fixed model and `null` for a binding without a model. The `total`
+field may be `null` even when some node prices are known. Nullable fields are
+still required. A row missing either identity field raises
+`invalid_schema_response`.
+
+## Service package catalog
+
+| Method (sync and async) | Result |
+| --- | --- |
+| `client.turbine.packages.snapshot()` | `CatalogSnapshot` |
+| `client.turbine.packages.list(catalog_revision=..., cursor=None, limit=100)` | `PackagePage` |
+| `client.turbine.packages.get(package_hash, catalog_revision=...)` | `Package` |
+
+Configure `TURBINE_BASE_URL` and `TURBINE_API_KEY` with the deployment URL and a
+service Bearer token that grants `catalog:read`. All three methods use the
+client's HTTP pool and timeout. They send requests under `/api/broker/v1/catalog`
+on the configured deployment, preserving its path prefix and stopping at
+redirect responses.
+
+```python
+from turbine_sdk import Turbine
+
+with Turbine() as client:
+    packages = client.turbine.packages
+    snapshot = packages.snapshot()
+    page = packages.list(catalog_revision=snapshot.revision)
+    if page.data:
+        package = packages.get(page.data[0].reference.digest, catalog_revision=snapshot.revision)
+```
+
+Each `list()` call reads one page with a `limit` from 1 to 200. Use the same
+revision and the preceding page's `next_cursor` to continue until it is `null`.
+If `list()` or `get()` raises `CatalogSnapshotExpired`, discard the incomplete
+traversal and start at the first page of a fresh snapshot. The SDK raises this
+exception for `410 catalog_snapshot_expired`.
+
+The response types and their nested types are importable from
+`turbine_sdk.schemas`. The models validate package format 1.1 and preserve
+binding-specific input and operation output schemas as JSON objects. A model
+without a provider-guaranteed version has `version: null`. Catalog errors carry
+HTTP status, the server code, request ID and retry delay when present.
 
 ## Errors and optional features
 

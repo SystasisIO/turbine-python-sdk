@@ -1,4 +1,4 @@
-"""Three native extensions use the existing client and never materialize assets."""
+"""Node and estimate extensions share the client and never materialize assets."""
 
 from __future__ import annotations
 
@@ -104,6 +104,8 @@ async def test_exact_routes_share_deployment_key_pool_and_preserve_single_node_m
             "nodes": [
                 {
                     "node_id": "1",
+                    "package_hash": "b" * 64,
+                    "operation_id": "text.complete",
                     "model_id": "provider/example",
                     "price": {"amount": "125", "precision": 4, "unit": "USD"},
                 }
@@ -263,6 +265,12 @@ async def test_unknown_non_json_errors_preserve_status_without_body_leaks(
         (b"[]", "invalid_schema_response"),
         (b'{"total":null,"nodes":[]}', "invalid_schema_response"),
         (b'{"total":null,"nodes":[],"breakdown_complete":1}', "invalid_schema_response"),
+        (
+            b'{"total":null,"nodes":[{"node_id":"1","model_id":null,'
+            b'"price":{"amount":"125","precision":4,"unit":"USD"}}],'
+            b'"breakdown_complete":false}',
+            "invalid_schema_response",
+        ),
     ],
 )
 async def test_malformed_json_and_invalid_response_schemas_are_distinguishable(
@@ -338,7 +346,17 @@ def test_extensions_have_separate_exact_route_coverage() -> None:
         ("GET", "/api/object_info"),
         ("GET", "/api/object_info/{class_type}"),
         ("POST", "/api/prompt/estimate"),
+        ("GET", "/api/broker/v1/catalog"),
+        ("GET", "/api/broker/v1/catalog/packages"),
+        ("GET", "/api/broker/v1/catalog/packages/{package_hash}"),
     )
     for transport in (TurbineLow, AsyncTurbineLow):
-        for name in ("get_node_catalog", "get_node_definition", "post_prompt_estimate"):
+        for name in (
+            "get_node_catalog",
+            "get_node_definition",
+            "post_prompt_estimate",
+            "get_catalog_snapshot",
+            "list_catalog_packages",
+            "get_catalog_package",
+        ):
             assert callable(getattr(transport, name))

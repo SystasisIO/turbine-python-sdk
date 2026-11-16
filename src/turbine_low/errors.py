@@ -229,6 +229,10 @@ class NotFound(ApiError):
     code = "not_found"
 
 
+class CatalogSnapshotExpired(ApiError):
+    code = "catalog_snapshot_expired"
+
+
 class Unauthorized(ApiError):
     code = "unauthorized"
 

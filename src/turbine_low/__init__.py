@@ -20,6 +20,7 @@ from . import models
 from .errors import (
     ApiError,
     BlobNotFound,
+    CatalogSnapshotExpired,
     Forbidden,
     HashMismatch,
     IdempotencyKeyReuse,
@@ -85,6 +86,7 @@ __all__ = [
     "QueueFull",
     "InsufficientCredits",
     "NotFound",
+    "CatalogSnapshotExpired",
     "Unauthorized",
     "Forbidden",
     "error_from_envelope",

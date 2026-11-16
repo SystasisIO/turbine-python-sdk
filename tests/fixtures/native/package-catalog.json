@@ -1,0 +1,124 @@
+{
+  "snapshot": {
+    "revision": "catalog/rev + ?&=",
+    "created_at": "2026-11-17T10:10:00.123456789Z",
+    "expires_at": "2026-11-17T10:15:00.123456789Z"
+  },
+  "packages": [
+    {
+      "reference": {
+        "id": "private-text",
+        "version": "1.0.0",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "descriptor_format": "turbine::compute-package/1.1",
+      "models": [],
+      "operations": [
+        {
+          "id": "text.prefix",
+          "bindings": [
+            {
+              "id": "comfy-text",
+              "protocol": "comfy",
+              "class_type": "PrivatePrefix",
+              "model_from_input": false,
+              "model_id": null,
+              "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}}
+            }
+          ],
+          "output_schema": {"type": "string"}
+        }
+      ],
+      "author": {"status": "unsigned"},
+      "support": null
+    },
+    {
+      "reference": {
+        "id": "example-text",
+        "version": "2.0.0",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "descriptor_format": "turbine::compute-package/1.1",
+      "models": [
+        {"id": "example-text", "display_name": "Example Text", "version": null},
+        {"id": "example-image", "display_name": "Example Image", "version": "v2"}
+      ],
+      "operations": [
+        {
+          "id": "text.complete",
+          "bindings": [
+            {
+              "id": "text",
+              "protocol": "comfy",
+              "class_type": "ExampleFixedText",
+              "model_from_input": false,
+              "model_id": "example-text",
+              "input_schema": {
+                "$ref": "#/$defs/input",
+                "$defs": {"input": {"type": "object", "properties": {"text": {"type": "string"}}}}
+              }
+            }
+          ],
+          "output_schema": {"type": "string"}
+        },
+        {
+          "id": "text.chat",
+          "bindings": [
+            {
+              "id": "text",
+              "protocol": "comfy",
+              "class_type": "ExampleTextChat",
+              "model_from_input": true,
+              "model_id": "example-text",
+              "input_schema": {
+                "type": "object",
+                "properties": {"model": {"type": "string"}, "prompt": {"type": "string"}},
+                "required": ["model", "prompt"]
+              }
+            },
+            {
+              "id": "messages",
+              "protocol": "comfy",
+              "class_type": "ExampleMessagesChat",
+              "model_from_input": true,
+              "model_id": "example-text",
+              "input_schema": {
+                "type": "object",
+                "properties": {"model": {"type": "string"}, "system_prompt": {"type": "string"}},
+                "required": ["model", "system_prompt"]
+              }
+            },
+            {
+              "id": "chat",
+              "protocol": "openai",
+              "api": "chat.completions",
+              "model_id": "example-text",
+              "input_schema": {"type": "object", "properties": {"messages": {"type": "array"}}}
+            }
+          ],
+          "output_schema": {"type": "string"}
+        },
+        {
+          "id": "image.generate",
+          "bindings": [
+            {
+              "id": "generate",
+              "protocol": "openai",
+              "api": "images.generations",
+              "model_id": "example-image",
+              "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}}}
+            }
+          ],
+          "output_schema": {"type": "object"}
+        }
+      ],
+      "author": {
+        "status": "verified",
+        "chain_id": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "account": "examplepub",
+        "verified_at_block_id": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "support": {"url": "https://example.org/support", "email": "support@example.org"}
+    }
+  ]
+}
