@@ -10,18 +10,53 @@ from urllib.parse import quote
 
 import httpx2
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from turbine_low.extension_transport import EXTENSION_ROUTES
 from turbine_low.transport import AsyncTurbineLow, TurbineLow
-from turbine_sdk import AsyncTurbine, Turbine, TurbineError
-from turbine_sdk.schemas import EstimateReply, NodeCatalog, PromptGraph
+from turbine_sdk import AsyncTurbine, IdempotencyKeyReuse, Turbine, TurbineError
+from turbine_sdk.schemas import EstimateReply, NodeCatalog, PricingAuthorization, PromptGraph
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "native"
+_SUBMISSION_KEY = "aaaaaaaa-1234-4def-89ab-0123456789ab"
+_PAID_GRAPH = {"1": {"class_type": "Example", "inputs": {"text": "hello"}}}
 
 
 def _fixture(name: str) -> dict:
     return json.loads((_FIXTURES / name).read_text())
+
+
+def _paid_estimate(amount: str, version: str) -> dict:
+    money = {"amount": amount, "precision": 0, "unit": "CRED"}
+    maximum = {**money, "contract": "cred.token"}
+    node = {
+        "node_id": "1",
+        "package_hash": "1" * 64,
+        "operation_id": "text.complete",
+        "model_id": None,
+    }
+    return {
+        "total": money,
+        "nodes": [{**node, "price": money}],
+        "breakdown_complete": True,
+        "x-turbine": {
+            "pricing": {
+                "maximum": maximum,
+                "nodes": [
+                    {
+                        **node,
+                        "binding_id": "prompt",
+                        "chain_id": "2" * 64,
+                        "service": "18446744073709551615",
+                        "version": version,
+                        "terms_hash": version * 64,
+                        "binding_digest": amount[0] * 64,
+                        "maximum": maximum,
+                    }
+                ],
+            }
+        },
+    }
 
 
 async def _result(value):
@@ -90,8 +125,154 @@ async def test_exact_routes_share_deployment_key_pool_and_preserve_single_node_m
         headers["Authorization"] == "Bearer native-key" for headers in server.state.native_headers
     )
     assert all(headers["X-Shared-Pool"] == "configured" for headers in server.state.native_headers)
+    assert [h.get("X-Turbine-Pricing") for h in server.state.native_headers] == [
+        None,
+        None,
+        "1",
+        None,
+    ]
     assert all("/api/v2/" not in path for _, path in server.state.http_requests)
     assert server.state.upload_count == server.state.submit_count == 0
+
+
+def test_paid_estimate_exposes_pricing_in_nested_response_schema() -> None:
+    class Envelope(BaseModel):
+        estimate: EstimateReply
+
+    body = {"estimate": _paid_estimate("7", "1")}
+    assert Envelope.model_validate(body).model_dump(mode="json") == body
+    definitions = Envelope.model_json_schema(mode="serialization")["$defs"]
+    estimate_schema = definitions["EstimateReply"]
+    assert set(estimate_schema["required"]) == {"total", "nodes", "breakdown_complete"}
+    assert set(estimate_schema["properties"]) == {
+        "total",
+        "nodes",
+        "breakdown_complete",
+        "x-turbine",
+    }
+    assert "PricingAuthorization" in definitions
+
+
+async def test_paid_submit_preserves_the_exact_terms_and_rejects_stale_quote(
+    server, client_type
+) -> None:
+    before = _paid_estimate("7", "1")
+    after = _paid_estimate("11", "2")
+    server.state.native_estimate = before
+    client = client_type()
+    try:
+        workflow = client.workflows.from_json(_PAID_GRAPH)
+        stale = await _result(client.turbine.estimate_prompt(workflow.json))
+        assert isinstance(stale.pricing, PricingAuthorization)
+        assert stale.model_dump(mode="json") == before
+        assert EstimateReply.model_validate(stale) == stale
+
+        server.state.native_estimate = after
+        server.state.job_error = (409, "payment_terms_mismatch")
+        with pytest.raises(TurbineError) as caught:
+            await _result(
+                client.submit(workflow, pricing=stale.pricing, idempotency_key=_SUBMISSION_KEY)
+            )
+        assert caught.value.code == "payment_terms_mismatch"
+        assert caught.value.http_status == 409
+        assert caught.value.idempotency_key == _SUBMISSION_KEY
+        assert server.state.last_jobs_body == {
+            "workflow": _PAID_GRAPH,
+            "metadata": {"backend_job_id": _SUBMISSION_KEY},
+            "x-turbine": before["x-turbine"],
+        }
+        assert server.state.idempotency == {}
+
+        fresh = await _result(client.turbine.estimate_prompt(workflow.json))
+        assert fresh.pricing is not None
+        assert fresh.pricing.maximum.amount == "11"
+        server.state.job_error = None
+        labels = {"client": "example"}
+        job = await _result(
+            client.submit(
+                workflow, pricing=fresh.pricing, idempotency_key=_SUBMISSION_KEY, metadata=labels
+            )
+        )
+        assert labels == {"client": "example"}
+        assert job.metadata == {"client": "example", "backend_job_id": _SUBMISSION_KEY}
+        assert server.state.last_jobs_body == {
+            "workflow": _PAID_GRAPH,
+            "metadata": job.metadata,
+            "x-turbine": after["x-turbine"],
+        }
+    finally:
+        await _close(client)
+    assert server.state.jobs_idempotency_keys == [_SUBMISSION_KEY, _SUBMISSION_KEY]
+    assert server.state.idempotency == {_SUBMISSION_KEY: job.id}
+
+
+async def test_paid_submit_validates_the_recoverable_key_before_post(server, client_type) -> None:
+    estimate = EstimateReply.model_validate(_paid_estimate("7", "1"))
+    client = client_type()
+    try:
+        workflow = client.workflows.from_json(_PAID_GRAPH)
+        with pytest.raises(ValueError, match="explicit UUID"):
+            await _result(client.submit(workflow, pricing=estimate.pricing))
+        with pytest.raises(ValueError, match="canonical UUID"):
+            await _result(
+                client.submit(workflow, pricing=estimate.pricing, idempotency_key="printable")
+            )
+        with pytest.raises(ValueError, match="backend_job_id"):
+            await _result(
+                client.submit(
+                    workflow,
+                    pricing=estimate.pricing,
+                    idempotency_key=_SUBMISSION_KEY,
+                    metadata={"backend_job_id": "another"},
+                )
+            )
+    finally:
+        await _close(client)
+    assert server.state.http_requests == []
+
+
+async def test_lost_paid_201_recovers_by_label_and_rejects_changed_request(
+    server, client_type
+) -> None:
+    estimate = EstimateReply.model_validate(_paid_estimate("7", "1"))
+    server.state.drop_job_creation_response = True
+    client = client_type()
+    try:
+        workflow = client.workflows.from_json(_PAID_GRAPH)
+        with pytest.raises(httpx2.RemoteProtocolError) as lost:
+            await _result(
+                client.submit(workflow, pricing=estimate.pricing, idempotency_key=_SUBMISSION_KEY)
+            )
+        key = lost.value.idempotency_key
+        assert key == _SUBMISSION_KEY
+        job_id = server.state.idempotency[key]
+        labels = {"backend_job_id": key}
+        server.state.job_metadata = labels
+        server.state.job_list_body = {
+            "jobs": [
+                {
+                    "id": job_id,
+                    "status": "queued",
+                    "create_time": "2026-07-10T18:20:00Z",
+                    "metadata": labels,
+                }
+            ]
+        }
+        if isinstance(client, AsyncTurbine):
+            (summary,) = [item async for item in client.list_jobs(metadata=labels)]
+        else:
+            (summary,) = list(client.list_jobs(metadata=labels))
+        job = await _result(client.jobs.get(summary.id))
+        assert job.id == job_id
+        assert job.metadata == labels
+        assert server.state.job_list_queries == [{"metadata[backend_job_id]": [key]}]
+
+        workflow.set_input("1", "text", "changed")
+        with pytest.raises(IdempotencyKeyReuse):
+            await _result(client.submit(workflow, pricing=estimate.pricing, idempotency_key=key))
+        assert server.state.idempotency == {key: job_id}
+    finally:
+        await _close(client)
 
 
 @pytest.mark.parametrize(
@@ -126,9 +307,36 @@ async def test_estimate_sends_only_the_prepared_graph_and_never_submits(
     finally:
         await _close(client)
     assert result.model_dump(mode="json") == reply
+    assert result.pricing is None
+    assert server.state.native_headers[0]["X-Turbine-Pricing"] == "1"
     assert server.state.native_prompts == [{"prompt": raw}]
     assert server.state.http_requests == [("POST", "/api/prompt/estimate")]
     assert server.state.upload_count == server.state.submit_count == 0
+
+
+async def test_paid_estimate_and_submit_use_the_same_v2_asset(server, client_type) -> None:
+    server.state.native_estimate = _paid_estimate("7", "1")
+    client = client_type()
+    try:
+        asset = client.assets.from_bytes(b"prepared", filename="input.png")
+        reference = await _result(asset.as_reference())
+        assert reference["__type"] == "core/ASSET"
+        prepared = {"1": {"class_type": "Example", "inputs": {"image": reference}}}
+        workflow = client.workflows.from_json(prepared)
+        requests_before_estimate = len(server.state.http_requests)
+        estimate = await _result(client.turbine.estimate_prompt(workflow.json))
+        assert server.state.http_requests[requests_before_estimate:] == [
+            ("POST", "/api/prompt/estimate")
+        ]
+        assert server.state.native_prompts == [{"prompt": prepared}]
+        assert estimate.pricing is not None
+        await _result(
+            client.submit(workflow, pricing=estimate.pricing, idempotency_key=_SUBMISSION_KEY)
+        )
+        assert server.state.last_jobs_body["workflow"] == prepared
+        assert server.state.upload_count == 1
+    finally:
+        await _close(client)
 
 
 @pytest.mark.parametrize("kind", ["handle", "workflow", "mutated_model", "constructed_model"])

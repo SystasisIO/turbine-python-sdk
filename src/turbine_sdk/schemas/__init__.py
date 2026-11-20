@@ -20,7 +20,15 @@ from turbine_low.models.packages import (
     UnsignedAuthor,
     VerifiedAuthor,
 )
-from turbine_low.models.pricing import EstimateReply, EstimateRequest, Money, NodeEstimate
+from turbine_low.models.pricing import (
+    EstimateReply,
+    EstimateRequest,
+    Money,
+    NodeEstimate,
+    NodePricingAuthorization,
+    PricingAsset,
+    PricingAuthorization,
+)
 
 __all__ = [
     "Author",
@@ -35,11 +43,14 @@ __all__ = [
     "NodeDefinition",
     "NodeEstimate",
     "NodeInputs",
+    "NodePricingAuthorization",
     "OpenAIBinding",
     "Operation",
     "Package",
     "PackagePage",
     "PackageRef",
+    "PricingAsset",
+    "PricingAuthorization",
     "PromptGraph",
     "PromptNode",
     "Support",

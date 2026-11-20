@@ -81,7 +81,7 @@ from .models import Asset, Job, JobWorkflowResponse
 from .models.catalog import NodeCatalog
 from .models.graph import PromptGraph
 from .models.packages import CATALOG_DEFAULT_LIMIT, CatalogSnapshot, Package, PackagePage
-from .models.pricing import EstimateReply
+from .models.pricing import EstimateReply, PricingAuthorization
 from .sse import RawEvent, SSEDecoder
 
 _API = "/api/v2"
@@ -1009,6 +1009,7 @@ def _jobs_body(
     workflow: dict[str, Any],
     extra_data: dict[str, Any] | None,
     metadata: Mapping[str, str] | None,
+    pricing: PricingAuthorization | None,
 ) -> dict[str, Any]:
     """The ``POST /jobs`` body. Optional fields are omitted when empty, so a
     caller that passes none of them sends exactly the body it always did.
@@ -1018,6 +1019,8 @@ def _jobs_body(
         body["extra_data"] = extra_data
     if metadata:
         body["metadata"] = dict(metadata)
+    if pricing is not None:
+        body["x-turbine"] = {"pricing": pricing.model_dump(mode="json")}
     return body
 
 
@@ -1245,7 +1248,13 @@ class TurbineLow:
         self, prompt: PromptGraph | dict[str, Any], *, timeout: Any = _UNSET
     ) -> EstimateReply:
         body = prepare_estimate(prompt)
-        response = self.raw_request("POST", estimate_url(self.base_url), json=body, timeout=timeout)
+        response = self.raw_request(
+            "POST",
+            estimate_url(self.base_url),
+            json=body,
+            headers={"X-Turbine-Pricing": "1"},
+            timeout=timeout,
+        )
         return parse_native_response(
             response,
             EstimateReply,
@@ -1452,6 +1461,7 @@ class TurbineLow:
         idempotency_key: str | None = None,
         extra_data: dict[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
+        pricing: PricingAuthorization | None = None,
         timeout: Any = _UNSET,
     ) -> Job:
         """POST /api/v2/jobs.
@@ -1462,6 +1472,7 @@ class TurbineLow:
         ``extra_data`` object, and a caller with no partner key should never
         send one. ``metadata`` (string labels stored on the job) is also a
         sibling, sent as given and omitted when ``None`` or empty.
+        ``pricing`` adds the optional Turbine paid-submission extension.
         """
         headers: dict[str, str] = {}
         if idempotency_key:
@@ -1470,7 +1481,7 @@ class TurbineLow:
             "POST",
             "/jobs",
             headers=headers,
-            json=_jobs_body(workflow, extra_data, metadata),
+            json=_jobs_body(workflow, extra_data, metadata, pricing),
             timeout=timeout,
         )
         data = self._p.parse_or_raise(resp, (201,))
@@ -1913,7 +1924,11 @@ class AsyncTurbineLow:
     ) -> EstimateReply:
         body = prepare_estimate(prompt)
         response = await self.raw_request(
-            "POST", estimate_url(self.base_url), json=body, timeout=timeout
+            "POST",
+            estimate_url(self.base_url),
+            json=body,
+            headers={"X-Turbine-Pricing": "1"},
+            timeout=timeout,
         )
         return parse_native_response(
             response,
@@ -2108,6 +2123,7 @@ class AsyncTurbineLow:
         idempotency_key: str | None = None,
         extra_data: dict[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
+        pricing: PricingAuthorization | None = None,
         timeout: Any = _UNSET,
     ) -> Job:
         """POST /api/v2/jobs — see the sync ``post_jobs`` for ``extra_data`` and ``metadata``."""
@@ -2118,7 +2134,7 @@ class AsyncTurbineLow:
             "POST",
             "/jobs",
             headers=headers,
-            json=_jobs_body(workflow, extra_data, metadata),
+            json=_jobs_body(workflow, extra_data, metadata, pricing),
             timeout=timeout,
         )
         data = self._p.parse_or_raise(resp, (201,))

@@ -12,10 +12,12 @@ import os
 import time
 from collections.abc import AsyncIterator, Iterator, Mapping
 from typing import Any
+from uuid import UUID
 
 import httpx2
 
 from turbine_low.errors import ApiError
+from turbine_low.models.pricing import PricingAuthorization
 from turbine_low.transport import (
     AsyncTurbineLow,
     TurbineLow,
@@ -148,6 +150,33 @@ def _guard_ui_format(workflow: Workflow) -> None:
         )
 
 
+def _submission_options(
+    idempotency_key: str | None,
+    metadata: Mapping[str, str] | None,
+    pricing: PricingAuthorization | None,
+) -> tuple[str, Mapping[str, str] | None, PricingAuthorization | None]:
+    if idempotency_key is None:
+        if pricing is not None:
+            raise ValueError("paid submissions require an explicit UUID idempotency_key")
+        return _core.new_idempotency_key(), metadata, None
+
+    key = _core.validate_idempotency_key(idempotency_key)
+    if pricing is None:
+        return key, metadata, None
+
+    try:
+        normalized = str(UUID(key))
+    except ValueError:
+        raise ValueError("paid submissions require a canonical UUID idempotency_key") from None
+    if key != normalized:
+        raise ValueError("paid submissions require a canonical UUID idempotency_key")
+
+    labels = dict(metadata or {})
+    if labels.setdefault("backend_job_id", key) != key:
+        raise ValueError("metadata.backend_job_id must match the paid submission key")
+    return key, labels, PricingAuthorization.model_validate(pricing)
+
+
 class Turbine:
     """Synchronous TurbineOS client.
 
@@ -230,6 +259,7 @@ class Turbine:
         api_key: str | None = None,
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        pricing: PricingAuthorization | None = None,
     ) -> Job:
         """Submit a workflow. Retries any 429 that carries ``Retry-After``.
 
@@ -276,15 +306,16 @@ class Turbine:
         key when one key or value breaks a rule, and gives the count when there
         are more than 16 pairs. Labels work on a deployment's address; Comfy
         Cloud refuses them for now with ``code == "metadata_not_supported"``.
+
+        ``pricing`` accepts the terms from
+        ``client.turbine.estimate_prompt(...).pricing`` on a Turbine deployment.
+        For a paid submit, save and pass a canonical UUID as ``idempotency_key``.
+        The SDK also sends it as the ``backend_job_id`` label. If the response
+        is lost, use that label with ``list_jobs`` and read the match with
+        ``jobs.get`` on the same authenticated deployment.
         """
         _guard_ui_format(workflow)
-        # Validated before any bytes move, like `models.run`: `""` used to
-        # fall into the mint-a-fresh-key branch and disable the caller's dedup.
-        key = (
-            _core.validate_idempotency_key(idempotency_key)
-            if idempotency_key is not None
-            else _core.new_idempotency_key()
-        )
+        key, metadata, pricing = _submission_options(idempotency_key, metadata, pricing)
         graph = self._materialize(workflow)
         extra_data = _core.extra_data_for(api_key)
         deadline = _now() + _QUEUE_RETRY_BUDGET
@@ -297,7 +328,11 @@ class Turbine:
             while True:
                 try:
                     model = self._low.post_jobs(
-                        graph, idempotency_key=key, extra_data=extra_data, metadata=metadata
+                        graph,
+                        idempotency_key=key,
+                        extra_data=extra_data,
+                        metadata=metadata,
+                        pricing=pricing,
                     )
                     return Job(self._low, model)
                 except ApiError as exc:
@@ -463,16 +498,13 @@ class AsyncTurbine:
         api_key: str | None = None,
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
+        pricing: PricingAuthorization | None = None,
     ) -> AsyncJob:
-        """Mirrors :meth:`Turbine.submit` — see there for ``api_key`` and ``metadata``."""
+        """Async counterpart of :meth:`Turbine.submit`, including paid pricing terms."""
         import asyncio
 
         _guard_ui_format(workflow)
-        key = (
-            _core.validate_idempotency_key(idempotency_key)
-            if idempotency_key is not None
-            else _core.new_idempotency_key()
-        )
+        key, metadata, pricing = _submission_options(idempotency_key, metadata, pricing)
         graph = await self._materialize(workflow)
         extra_data = _core.extra_data_for(api_key)
         deadline = _now() + _QUEUE_RETRY_BUDGET
@@ -482,7 +514,11 @@ class AsyncTurbine:
             while True:
                 try:
                     model = await self._low.post_jobs(
-                        graph, idempotency_key=key, extra_data=extra_data, metadata=metadata
+                        graph,
+                        idempotency_key=key,
+                        extra_data=extra_data,
+                        metadata=metadata,
+                        pricing=pricing,
                     )
                     return AsyncJob(self._low, model)
                 except ApiError as exc:

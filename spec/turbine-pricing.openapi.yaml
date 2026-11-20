@@ -1,0 +1,255 @@
+openapi: 3.0.3
+info:
+  title: Turbine workflow pricing extension
+  version: 1.0.0
+  description: Paid workflow profile for a Turbine deployment of Comfy v2.
+security:
+  - bearerAuth: []
+paths:
+  /api/prompt/estimate:
+    post:
+      operationId: estimatePrompt
+      summary: Preview prices for a prepared API graph
+      parameters:
+        - in: header
+          name: X-Turbine-Pricing
+          required: false
+          schema:
+            type: string
+            enum: ['1']
+          description: |
+            Request authorization terms and accept prepared v2 core/ASSET inputs
+            alongside native file references. Without this header the route
+            returns the original total, nodes and breakdown_complete fields.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [prompt]
+              properties:
+                prompt:
+                  type: object
+                  additionalProperties: true
+      responses:
+        '200':
+          description: Available prices and, when requested and complete, proposed authorization terms.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Estimate'
+        '400':
+          description: Invalid prepared graph or incompatible asset media type. Uses the native Comfy error envelope.
+        '404':
+          description: An input asset is unavailable to this owner. Uses the native Comfy error envelope.
+        '503':
+          description: Verified pricing is unavailable. Uses the native Comfy error envelope.
+  /api/v2/jobs:
+    post:
+      operationId: submitPricedWorkflow
+      x-upstream-operation-id: postJobs
+      summary: Submit a workflow with bounded payment authorization
+      description: |
+        Supply the same prepared graph and the authorization terms proposed by the estimate.
+        Turbine rechecks each selected release, binding, model, tariff, and price at admission.
+        One accepted submission consumes its key and its recovery label.
+        If the 201 is lost, find the job on the same deployment as the same owner with
+        GET /api/v2/jobs?metadata%5Bbackend_job_id%5D=<uuid>, then fetch the full job by ID.
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+            pattern: '^[ -~]+$'
+          description: Stable key. The SDK sends the same canonical UUID as the recovery label.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: './openapi.yaml#/paths/~1api~1v2~1jobs/post/requestBody/content/application~1json/schema'
+                - type: object
+                  required: [metadata, x-turbine]
+                  properties:
+                    extra_data:
+                      type: object
+                      maxProperties: 0
+                    metadata:
+                      type: object
+                      maxProperties: 16
+                      required: [backend_job_id]
+                      additionalProperties:
+                        type: string
+                      properties:
+                        backend_job_id:
+                          type: string
+                          format: uuid
+                          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                    x-turbine:
+                      $ref: '#/components/schemas/PricingExtension'
+      responses:
+        '201':
+          $ref: './openapi.yaml#/paths/~1api~1v2~1jobs/post/responses/201'
+        '409':
+          description: payment_terms_mismatch or payment_budget_exceeded
+          content:
+            application/json:
+              schema:
+                $ref: './openapi.yaml#/components/schemas/ErrorEnvelope'
+        '422':
+          description: |
+            invalid_pricing for malformed terms or payment_idempotency_required for missing identity.
+            The deployment requires explicit terms on a positive-priced graph (payment_required).
+            A claimed key returns idempotency_key_reuse before the body is processed.
+            Other request errors use the Comfy v2 envelope.
+          content:
+            application/json:
+              schema:
+                $ref: './openapi.yaml#/components/schemas/ErrorEnvelope'
+        '503':
+          description: payment_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: './openapi.yaml#/components/schemas/ErrorEnvelope'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    Estimate:
+      type: object
+      additionalProperties: false
+      required: [total, nodes, breakdown_complete]
+      properties:
+        total:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [amount, precision, unit]
+          properties: &preview_money
+            amount:
+              type: string
+              pattern: '^[0-9]+$'
+            precision:
+              type: integer
+              minimum: 0
+            unit:
+              type: string
+              minLength: 1
+        nodes:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [node_id, package_hash, operation_id, model_id, price]
+            properties:
+              node_id:
+                type: string
+                minLength: 1
+              package_hash:
+                $ref: '#/components/schemas/Digest'
+              operation_id:
+                $ref: '#/components/schemas/Identifier'
+              model_id:
+                type: string
+                nullable: true
+                minLength: 1
+              price:
+                type: object
+                additionalProperties: false
+                required: [amount, precision, unit]
+                properties: *preview_money
+        breakdown_complete:
+          type: boolean
+        x-turbine:
+          $ref: '#/components/schemas/PricingExtension'
+    PricingExtension:
+      type: object
+      additionalProperties: false
+      required: [pricing]
+      properties:
+        pricing:
+          $ref: '#/components/schemas/PricingAuthorization'
+    PricingAuthorization:
+      type: object
+      additionalProperties: false
+      required: [maximum, nodes]
+      properties:
+        maximum:
+          $ref: '#/components/schemas/PricingAsset'
+        nodes:
+          description: One authorization for each selected node. Their maximums fit within the graph maximum.
+          type: array
+          minItems: 1
+          maxItems: 4096
+          items:
+            $ref: '#/components/schemas/NodePricingAuthorization'
+    NodePricingAuthorization:
+      type: object
+      additionalProperties: false
+      required: [node_id, package_hash, operation_id, binding_id, model_id, chain_id, service, version,
+                 terms_hash, binding_digest, maximum]
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        package_hash:
+          $ref: '#/components/schemas/Digest'
+        operation_id:
+          $ref: '#/components/schemas/Identifier'
+        binding_id:
+          $ref: '#/components/schemas/Identifier'
+        model_id:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 256
+        chain_id:
+          $ref: '#/components/schemas/Digest'
+        service:
+          $ref: '#/components/schemas/TariffIdentifier'
+        version:
+          $ref: '#/components/schemas/TariffIdentifier'
+        terms_hash:
+          $ref: '#/components/schemas/Digest'
+        binding_digest:
+          $ref: '#/components/schemas/Digest'
+        maximum:
+          $ref: '#/components/schemas/PricingAsset'
+    PricingAsset:
+      type: object
+      additionalProperties: false
+      required: [amount, precision, unit, contract]
+      properties:
+        amount:
+          description: Minor units as a canonical decimal string in the chain asset range, from 0 to 4611686018427387903.
+          type: string
+          pattern: '^(0|[1-9][0-9]{0,18})$'
+        precision:
+          type: integer
+          minimum: 0
+          maximum: 255
+        unit:
+          type: string
+          pattern: '^[A-Z]{1,7}$'
+        contract:
+          type: string
+          pattern: '^([.1-5a-z]{0,11}[1-5a-z]|[.1-5a-z]{12}[1-5a-j])$'
+    Identifier:
+      type: string
+      minLength: 1
+      maxLength: 256
+    TariffIdentifier:
+      description: Nonzero unsigned 64-bit integer as a canonical decimal string.
+      type: string
+      pattern: '^[1-9][0-9]{0,19}$'
+    Digest:
+      type: string
+      pattern: '^[0-9a-f]{64}$'

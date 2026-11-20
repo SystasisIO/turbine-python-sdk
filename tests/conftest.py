@@ -83,6 +83,8 @@ class ServerState:
     job_error: tuple[int, str] | None = None
     # The message that envelope carries; None means a generic one.
     job_error_message: str | None = None
+    # Accept and record a submit, then disconnect before writing its 201.
+    drop_job_creation_response: bool = False
     # The `metadata` every job answer reports (GET /jobs/{id}, the cancel, and
     # the submit, which otherwise echoes what was sent), served exactly as
     # given, so a test can send a shape the SDK did not ask for. None omits the
@@ -1330,6 +1332,9 @@ def _make_handler(state: ServerState):
             job_id = f"job_{state.submit_count:02d}"
             if key:
                 state.idempotency[key] = job_id
+            if state.drop_job_creation_response:
+                self.close_connection = True
+                return
             metadata = (
                 state.job_metadata if state.job_metadata is not None else body.get("metadata")
             )

@@ -103,9 +103,9 @@ async def generate() -> None:
 ```
 
 SSE reconnect follows the existing v2 behavior; it does not promise replay of
-missed events. GET Job provides authoritative state. A lost submit response
-must not be retried with a newly minted identity. Preserve the original key and
-error context; server-side recovery remains a contract dependency.
+missed events. GET Job provides authoritative execution state. Preserve the
+original key and error context after a lost submit response. See paid workflow
+submission for recovery by job metadata.
 
 ## Nodes and estimates
 
@@ -131,9 +131,10 @@ with Turbine(base_url="http://127.0.0.1:8189", api_key=None) as client:
 ```
 
 Estimate accepts **prepared JSON only**, without Asset handles. It sends only
-`{"prompt": graph}` and does not upload files or submit a workflow. To compare
-preview and execution, supply the same prepared graph to both. Equivalence of
-native file inputs and v2 asset references must be established by the server.
+`{"prompt": graph}` and does not upload files or submit a workflow. For v2 asset
+inputs, call `asset.as_reference()` (or `await asset.as_reference()`) first.
+Place the resulting `core/ASSET` object in the graph and pass the same graph
+to estimate and submit. Turbine verifies the asset's owner and media type.
 
 The shared schemas are defined once in `turbine_low.models` modules and
 re-exported as the same types from `turbine_sdk.schemas`. They are suitable for
@@ -164,6 +165,57 @@ selected or fixed model and `null` for a binding without a model. The `total`
 field may be `null` even when some node prices are known. Nullable fields are
 still required. A row missing either identity field raises
 `invalid_schema_response`.
+
+## Paid workflow submission
+
+The SDK requests pricing terms with the `X-Turbine-Pricing: 1` header.
+Callers that omit the header receive the original `total`, `nodes` and
+`breakdown_complete` fields. An older server can return this original
+response to the SDK, in which case `estimate.pricing` is `None`.
+
+When `estimate.pricing` is present, it carries a spending limit for the graph
+and each selected node. Each limit specifies the token contract, unit and
+precision. The terms identify the release, operation, binding, model and exact
+tariff, including the digest of its input mapping. Turbine verifies the
+current terms and price before admitting the job. [Pricing extension OpenAPI](spec/turbine-pricing.openapi.yaml)
+
+```python
+workflow = client.workflows.from_json(graph)
+estimate = client.turbine.estimate_prompt(workflow.json)
+if estimate.pricing is None:
+    raise ValueError("A complete price estimate is required")
+
+# Use the canonical UUID stored for this logical submission.
+job = client.submit(workflow, pricing=estimate.pricing, idempotency_key=submission_id)
+```
+
+For paid submission, omit the optional partner-node `api_key` argument to
+`submit`. The client authenticates with its Turbine deployment credential.
+
+A `201` response confirms admission. `job.status == "succeeded"` confirms that
+the workflow ran successfully. The estimate and submitted `pricing` show the
+spending limits. The deployment tracks final charges and refunds separately
+from the SDK's Job responses.
+
+The SDK sends the UUID in `Idempotency-Key` and in `metadata.backend_job_id`.
+On `409 payment_terms_mismatch` or `409 payment_budget_exceeded`, obtain a fresh
+estimate and authorize its terms before submitting again. After a lost 201,
+look up the stored UUID using the same deployment and credential. An
+accepted key reused on POST receives `422 idempotency_key_reuse`.
+
+```python
+labels = {"backend_job_id": submission_id}
+matches = list(client.list_jobs(metadata=labels))
+if len(matches) == 1:
+    recovered = client.jobs.get(matches[0].id)
+    if recovered.id == matches[0].id and recovered.metadata.get("backend_job_id") == submission_id:
+        # Continue with the original job.
+        job = recovered
+```
+
+Keep an ambiguous submission pending when you cannot confirm one exact match
+and its full Job. The async client uses the same authorization and lookup
+with `await` and `async for`.
 
 ## Service package catalog
 

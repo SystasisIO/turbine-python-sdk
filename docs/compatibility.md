@@ -16,12 +16,11 @@ The fork's Python names and transport are independent of those wire contracts.
 | Router discovery, model calls and queue | Vendored Router contract and existing SDK | Explicitly enabled `models` resource | Offline Router suite and drift checks | NOT_RUN |
 | Native node catalog | Agreed native Comfy object_info response | `client.turbine.nodes.list/get` | Local HTTP stub | NOT_RUN |
 | Service package catalog | TurbineOS service package catalog contract | `client.turbine.packages.snapshot/list/get` | Local HTTP stub and shared schema tests | NOT_RUN |
-| Prepared prompt estimate | Agreed prompt/estimate extension | `client.turbine.estimate_prompt` | Local HTTP stub and shared schema tests | NOT_RUN |
+| Prepared prompt estimate and paid submission | Turbine pricing extension in `spec/turbine-pricing.openapi.yaml` | `client.turbine.estimate_prompt`, `submit(pricing=...)` | Local HTTP stub and shared schema tests | NOT_RUN |
 
-The local stub establishes SDK request/response behavior, not server readiness.
-No real provider calls, generations or billing are part of offline acceptance.
-Financial admission, final charges and refunds, and native frontend
-HTTP/WebSocket conversion have separate contracts.
+The local stub verifies the SDK's request and response behavior. Financial
+admission, final charges and refunds, and native frontend HTTP/WebSocket
+conversion require server verification.
 
 ## Consumer contract
 
@@ -32,8 +31,12 @@ HTTP/WebSocket conversion have separate contracts.
 - Existing v2 wire models remain under `turbine_low.models`; Job/Asset handles
   and event helpers remain SDK resources. They do not replace native frontend
   response envelopes or frontend WebSocket messages.
-- Estimate takes only prepared JSON. Reuse the same graph for submit; SDK does
-  not claim equivalence between native file references and v2 asset references.
+- Estimate takes prepared JSON and sends `X-Turbine-Pricing: 1` to request
+  payment terms. Use the same prepared `core/ASSET` input for estimate and
+  v2 submission. A legacy estimate response leaves `estimate.pricing` at `None`.
+- Paid submission sends `pricing` as spending authorization. Job status and
+  events report execution. The deployment tracks final charges and refunds
+  separately from the SDK's Job responses.
 - Supply `base_url` or `TURBINE_BASE_URL`. Router is disabled unless explicitly
   configured. No token is automatically sent to Comfy Cloud or Comfy Router.
 - Supplied HTTPX2 clients remain caller-owned; SDK-created clients are closed
@@ -85,13 +88,22 @@ required package and operation identities in estimate rows.
 | Ruff lint and format, mypy, codegen drift and public repository hygiene | Passed |
 | Wheel, source distribution and wheel rebuilt from that distribution | Built successfully. Metadata and wheel contents verified |
 
+### Paid Comfy v2
+
+Two local end-to-end runs exercised paid SDK requests over HTTPS against two
+TurbineOS nodes at revision `976f4c7569d0e35b0c894352a316b9b59b75c13a`. Both
+runs checked the guest payment records. The SDK build used in those runs
+predates the response JSON Schema adjustment and uses the same HTTP format.
+[TurbineOS paid workflow test](https://github.com/SystasisIO/turbine/blob/976f4c7569d0e35b0c894352a316b9b59b75c13a/tests/integration/compute/comfy_v2_paid.py)
+
+Verification with a live Spine network or a customer deployment is `NOT_RUN`.
+
 ## Remaining server dependencies
 
 A live TurbineOS deployment must confirm v2 methods, metadata/list semantics,
-SSE and all three native extension routes. A lost submit response needs a
-server-supported correlation/recovery contract; v2 key reuse alone is not
-response replay. Estimates do not grant financial admission or impose a spend
-limit. These conditions do not require introducing a second client in SDK.
+SSE and the native extension routes. For paid submission, this includes
+admission with the authorized terms and lost-response recovery using
+`backend_job_id` on the same deployment with the submitting credential.
 
 ## Release state
 

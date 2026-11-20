@@ -120,9 +120,9 @@ class TurbineExtensions:
     def estimate_prompt(self, prompt: PromptGraph | dict[str, Any]) -> EstimateReply:
         """Preview a prepared JSON graph without uploading or running anything.
 
-        Asset handles and other non-JSON values are rejected before HTTP. For
-        a comparable preview and submission, use the same prepared graph for
-        both; native file-reference and v2 asset equivalence is server-owned.
+        For v2 asset inputs, prepare the graph with an uploaded asset's
+        ``as_reference()`` and pass that same graph to submit. Asset handles
+        and other non-JSON values are rejected before HTTP.
         """
         with translating():
             return self._low.post_prompt_estimate(prompt)
