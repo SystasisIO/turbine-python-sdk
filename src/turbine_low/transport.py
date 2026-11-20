@@ -72,16 +72,19 @@ from .extension_transport import (
     catalog_page_url,
     catalog_snapshot_url,
     estimate_url,
+    job_settlement_url,
     node_catalog_url,
     parse_catalog_response,
+    parse_job_settlement_response,
     parse_native_response,
     prepare_estimate,
+    prepare_execution_targets,
 )
 from .models import Asset, Job, JobWorkflowResponse
 from .models.catalog import NodeCatalog
 from .models.graph import PromptGraph
 from .models.packages import CATALOG_DEFAULT_LIMIT, CatalogSnapshot, Package, PackagePage
-from .models.pricing import EstimateReply, PricingAuthorization
+from .models.pricing import EstimateReply, JobSettlement, PricingAuthorization
 from .sse import RawEvent, SSEDecoder
 
 _API = "/api/v2"
@@ -1010,6 +1013,7 @@ def _jobs_body(
     extra_data: dict[str, Any] | None,
     metadata: Mapping[str, str] | None,
     pricing: PricingAuthorization | None,
+    partial_execution_targets: list[str] | None,
 ) -> dict[str, Any]:
     """The ``POST /jobs`` body. Optional fields are omitted when empty, so a
     caller that passes none of them sends exactly the body it always did.
@@ -1021,6 +1025,8 @@ def _jobs_body(
         body["metadata"] = dict(metadata)
     if pricing is not None:
         body["x-turbine"] = {"pricing": pricing.model_dump(mode="json")}
+    if partial_execution_targets is not None:
+        body["partial_execution_targets"] = prepare_execution_targets(partial_execution_targets)
     return body
 
 
@@ -1245,9 +1251,13 @@ class TurbineLow:
         )
 
     def post_prompt_estimate(
-        self, prompt: PromptGraph | dict[str, Any], *, timeout: Any = _UNSET
+        self,
+        prompt: PromptGraph | dict[str, Any],
+        *,
+        partial_execution_targets: list[str] | None = None,
+        timeout: Any = _UNSET,
     ) -> EstimateReply:
-        body = prepare_estimate(prompt)
+        body = prepare_estimate(prompt, partial_execution_targets=partial_execution_targets)
         response = self.raw_request(
             "POST",
             estimate_url(self.base_url),
@@ -1261,6 +1271,17 @@ class TurbineLow:
             retry_after=_retry_after(response),
             request_id=_request_id(response),
         )
+
+    def get_job_settlement(self, job_id: str, *, timeout: Any = _UNSET) -> JobSettlement:
+        """Read settlement by canonical job ID on the configured deployment."""
+        url = job_settlement_url(self.base_url, job_id)
+        with self.open(
+            "GET", url, timeout=timeout, follow_redirects=False, _exact_query=True
+        ) as resp:
+            resp.read()
+            return parse_job_settlement_response(
+                resp, job_id, retry_after=_retry_after(resp), request_id=_request_id(resp)
+            )
 
     def _get_catalog(
         self,
@@ -1462,6 +1483,7 @@ class TurbineLow:
         extra_data: dict[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         pricing: PricingAuthorization | None = None,
+        partial_execution_targets: list[str] | None = None,
         timeout: Any = _UNSET,
     ) -> Job:
         """POST /api/v2/jobs.
@@ -1472,20 +1494,23 @@ class TurbineLow:
         ``extra_data`` object, and a caller with no partner key should never
         send one. ``metadata`` (string labels stored on the job) is also a
         sibling, sent as given and omitted when ``None`` or empty.
-        ``pricing`` adds the optional Turbine paid-submission extension.
+        ``pricing`` adds the optional Turbine paid-submission extension and
+        disables redirects for this request.
+        ``partial_execution_targets`` selects explicit output nodes on Turbine.
         """
         headers: dict[str, str] = {}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
-        resp = self.raw_request(
+        with self.open(
             "POST",
             "/jobs",
             headers=headers,
-            json=_jobs_body(workflow, extra_data, metadata, pricing),
+            json=_jobs_body(workflow, extra_data, metadata, pricing, partial_execution_targets),
             timeout=timeout,
-        )
-        data = self._p.parse_or_raise(resp, (201,))
-        return _job(data)
+            follow_redirects=False if pricing is not None else None,
+        ) as resp:
+            resp.read()
+            return _job(self._p.parse_or_raise(resp, (201,)))
 
     def list_jobs(
         self,
@@ -1920,9 +1945,13 @@ class AsyncTurbineLow:
         )
 
     async def post_prompt_estimate(
-        self, prompt: PromptGraph | dict[str, Any], *, timeout: Any = _UNSET
+        self,
+        prompt: PromptGraph | dict[str, Any],
+        *,
+        partial_execution_targets: list[str] | None = None,
+        timeout: Any = _UNSET,
     ) -> EstimateReply:
-        body = prepare_estimate(prompt)
+        body = prepare_estimate(prompt, partial_execution_targets=partial_execution_targets)
         response = await self.raw_request(
             "POST",
             estimate_url(self.base_url),
@@ -1936,6 +1965,17 @@ class AsyncTurbineLow:
             retry_after=_retry_after(response),
             request_id=_request_id(response),
         )
+
+    async def get_job_settlement(self, job_id: str, *, timeout: Any = _UNSET) -> JobSettlement:
+        """Async counterpart of :meth:`TurbineLow.get_job_settlement`."""
+        url = job_settlement_url(self.base_url, job_id)
+        async with self.open(
+            "GET", url, timeout=timeout, follow_redirects=False, _exact_query=True
+        ) as resp:
+            await resp.aread()
+            return parse_job_settlement_response(
+                resp, job_id, retry_after=_retry_after(resp), request_id=_request_id(resp)
+            )
 
     async def _get_catalog(
         self,
@@ -2124,21 +2164,23 @@ class AsyncTurbineLow:
         extra_data: dict[str, Any] | None = None,
         metadata: Mapping[str, str] | None = None,
         pricing: PricingAuthorization | None = None,
+        partial_execution_targets: list[str] | None = None,
         timeout: Any = _UNSET,
     ) -> Job:
         """POST /api/v2/jobs — see the sync ``post_jobs`` for ``extra_data`` and ``metadata``."""
         headers: dict[str, str] = {}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
-        resp = await self.raw_request(
+        async with self.open(
             "POST",
             "/jobs",
             headers=headers,
-            json=_jobs_body(workflow, extra_data, metadata, pricing),
+            json=_jobs_body(workflow, extra_data, metadata, pricing, partial_execution_targets),
             timeout=timeout,
-        )
-        data = self._p.parse_or_raise(resp, (201,))
-        return _job(data)
+            follow_redirects=False if pricing is not None else None,
+        ) as resp:
+            await resp.aread()
+            return _job(self._p.parse_or_raise(resp, (201,)))
 
     async def list_jobs(
         self,

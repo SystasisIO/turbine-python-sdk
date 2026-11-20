@@ -213,6 +213,7 @@ def to_sdk_error(exc: ApiError) -> TurbineError:
             http_status=exc.http_status,
             details=exc.details,
             request_id=exc.request_id,
+            envelope_code=exc.envelope_code,
         )
     cls = _class_for(exc)
     if issubclass(cls, RouterError):
@@ -267,6 +268,7 @@ def to_sdk_error(exc: ApiError) -> TurbineError:
         # collects an already-billed generation, and dropping it here left the
         # caller told to wait with nothing to wait on.
         retry_after=exc.retry_after,
+        envelope_code=exc.envelope_code,
     )
 
 
@@ -294,7 +296,7 @@ _STAMPABLE: tuple[type[BaseException], ...] = (
 #: :data:`_STAMPABLE` so an attribute added to :class:`TurbineError` for the
 #: caller to read inside an ``except`` block is added here too —
 #: ``tests/test_error_contract.py`` pins the pairing.
-_STAMPED_ATTRIBUTES = ("request_id", "retry_after")
+_STAMPED_ATTRIBUTES = ("request_id", "retry_after", "envelope_code")
 
 #: Stamped like :data:`_STAMPED_ATTRIBUTES`, but defaulted to ``False``
 #: rather than ``None``: these are booleans a caller tests directly, and a

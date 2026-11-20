@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: Turbine workflow pricing extension
   version: 1.0.0
-  description: Paid workflow profile for a Turbine deployment of Comfy v2.
+  description: Paid workflow admission and owner settlement for a Turbine deployment of Comfy v2.
 security:
   - bearerAuth: []
 paths:
@@ -33,6 +33,8 @@ paths:
                 prompt:
                   type: object
                   additionalProperties: true
+                partial_execution_targets:
+                  $ref: '#/components/schemas/ExecutionTargets'
       responses:
         '200':
           description: Available prices and, when requested and complete, proposed authorization terms.
@@ -53,6 +55,7 @@ paths:
       summary: Submit a workflow with bounded payment authorization
       description: |
         Supply the same prepared graph and the authorization terms proposed by the estimate.
+        For partial execution, use the same selected targets in estimate and submit.
         Turbine rechecks each selected release, binding, model, tariff, and price at admission.
         One accepted submission consumes its key and its recovery label.
         If the 201 is lost, find the job on the same deployment as the same owner with
@@ -77,6 +80,8 @@ paths:
                 - type: object
                   required: [metadata, x-turbine]
                   properties:
+                    partial_execution_targets:
+                      $ref: '#/components/schemas/ExecutionTargets'
                     extra_data:
                       type: object
                       maxProperties: 0
@@ -88,9 +93,7 @@ paths:
                         type: string
                       properties:
                         backend_job_id:
-                          type: string
-                          format: uuid
-                          pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                          $ref: '#/components/schemas/CanonicalUuid'
                     x-turbine:
                       $ref: '#/components/schemas/PricingExtension'
       responses:
@@ -114,6 +117,42 @@ paths:
                 $ref: './openapi.yaml#/components/schemas/ErrorEnvelope'
         '503':
           description: payment_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: './openapi.yaml#/components/schemas/ErrorEnvelope'
+  /api/v2/jobs/{id}/settlement:
+    get:
+      operationId: getJobSettlement
+      summary: Read confirmed financial state for a Job owned by the caller
+      description: |
+        Requires the submitting owner and permission to read job state. Use the Job ID returned
+        by the deployment. Check settlement independently of the execution status.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            $ref: '#/components/schemas/CanonicalUuid'
+      responses:
+        '200':
+          description: The current settlement state for the Job.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobSettlement'
+        '401':
+          $ref: './openapi.yaml#/components/responses/Unauthorized'
+        '403':
+          $ref: './openapi.yaml#/components/responses/Forbidden'
+        '404':
+          description: The Job is unknown or unavailable to this owner.
+          content:
+            application/json:
+              schema:
+                $ref: './openapi.yaml#/components/schemas/ErrorEnvelope'
+        '503':
+          description: Settlement could not be read temporarily.
           content:
             application/json:
               schema:
@@ -227,7 +266,7 @@ components:
       type: object
       additionalProperties: false
       required: [amount, precision, unit, contract]
-      properties:
+      properties: &pricing_asset
         amount:
           description: Minor units as a canonical decimal string in the chain asset range, from 0 to 4611686018427387903.
           type: string
@@ -242,6 +281,83 @@ components:
         contract:
           type: string
           pattern: '^([.1-5a-z]{0,11}[1-5a-z]|[.1-5a-z]{12}[1-5a-j])$'
+    JobSettlement:
+      type: object
+      additionalProperties: false
+      required: [job_id, status, total, nodes]
+      properties:
+        job_id:
+          $ref: '#/components/schemas/CanonicalUuid'
+        status:
+          type: string
+          enum: [pending, final, not_applicable]
+          description: |
+            Pending means final financial evidence is unavailable. Not applicable means the Job
+            has no recorded payment authorization. Both states use a null total and empty nodes.
+            Final states include the exact total and a row for each node selected at admission.
+        total:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [amount, precision, unit, contract]
+          properties: *pricing_asset
+          description: Sum of the final node charges, including an explicit zero if confirmed.
+        nodes:
+          type: array
+          maxItems: 4096
+          description: Final node rows have unique IDs, the same chain, and the asset of the total.
+          items:
+            $ref: '#/components/schemas/NodeSettlement'
+    NodeSettlement:
+      type: object
+      additionalProperties: false
+      required: [node_id, package_hash, operation_id, binding_id, model_id, chain_id, service, version,
+                 terms_hash, binding_digest, charge, outcome]
+      properties:
+        node_id:
+          $ref: '#/components/schemas/Identifier'
+        package_hash:
+          $ref: '#/components/schemas/Digest'
+        operation_id:
+          $ref: '#/components/schemas/Identifier'
+        binding_id:
+          $ref: '#/components/schemas/Identifier'
+        model_id:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 256
+        chain_id:
+          $ref: '#/components/schemas/Digest'
+        service:
+          $ref: '#/components/schemas/TariffIdentifier'
+        version:
+          $ref: '#/components/schemas/TariffIdentifier'
+        terms_hash:
+          $ref: '#/components/schemas/Digest'
+        binding_digest:
+          $ref: '#/components/schemas/Digest'
+        charge:
+          $ref: '#/components/schemas/PricingAsset'
+        outcome:
+          type: string
+          enum: [settled, released, not_opened, zero_price]
+          description: |
+            Settlement is confirmed for a settled order. A released order, an order confirmed as
+            never opened, or a zero-priced node has a zero charge.
+    CanonicalUuid:
+      type: string
+      format: uuid
+      minLength: 36
+      maxLength: 36
+      pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ExecutionTargets:
+      description: Explicit node IDs whose dependency closure is selected for execution.
+      type: array
+      minItems: 1
+      maxItems: 4096
+      items:
+        $ref: '#/components/schemas/Identifier'
     Identifier:
       type: string
       minLength: 1

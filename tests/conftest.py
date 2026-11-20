@@ -40,6 +40,7 @@ class ServerState:
     native_estimate: dict[str, Any] = field(
         default_factory=lambda: {"total": None, "nodes": [], "breakdown_complete": False}
     )
+    job_settlement: dict[str, Any] | None = None
     package_catalog_replies: dict[str, dict[str, Any]] = field(default_factory=dict)
     native_deployment_prefix: str = ""
     native_status: int = 200
@@ -83,6 +84,8 @@ class ServerState:
     job_error: tuple[int, str] | None = None
     # The message that envelope carries; None means a generic one.
     job_error_message: str | None = None
+    # Redirect the first POST /jobs to (status, location).
+    jobs_redirect_once: tuple[int, str] | None = None
     # Accept and record a submit, then disconnect before writing its 201.
     drop_job_creation_response: bool = False
     # The `metadata` every job answer reports (GET /jobs/{id}, the cancel, and
@@ -646,6 +649,12 @@ def _make_handler(state: ServerState):
                 class_type = unquote(native_path.removeprefix("/api/object_info/"))
                 definition = state.native_catalog.get(class_type)
                 self._native_reply({class_type: definition} if definition is not None else {})
+                return
+            if re.fullmatch(r"/api/v2/jobs/[^/]+/settlement", native_path):
+                if state.job_settlement is None:
+                    self._err(404, "job_not_found", "Job not found")
+                else:
+                    self._native_reply(state.job_settlement)
                 return
 
             m = re.match(r"/api/v2/assets/([^/]+)/content$", self.path)
@@ -1289,6 +1298,16 @@ def _make_handler(state: ServerState):
                 # Reject-on-duplicate (single-use keys, no replay): any reuse of
                 # an already-claimed key is 422 idempotency_key_reuse.
                 self._err(422, "idempotency_key_reuse", "Idempotency-Key already used")
+                return
+
+            if state.jobs_redirect_once is not None:
+                status, location = state.jobs_redirect_once
+                state.jobs_redirect_once = None
+                self._json(
+                    status,
+                    {"error": {"code": "payment_unavailable", "message": "Redirect response"}},
+                    headers={"Location": location},
+                )
                 return
 
             if state.queue_full_times > 0:

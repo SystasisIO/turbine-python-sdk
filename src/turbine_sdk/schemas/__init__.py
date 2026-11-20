@@ -23,9 +23,11 @@ from turbine_low.models.packages import (
 from turbine_low.models.pricing import (
     EstimateReply,
     EstimateRequest,
+    JobSettlement,
     Money,
     NodeEstimate,
     NodePricingAuthorization,
+    NodeSettlement,
     PricingAsset,
     PricingAuthorization,
 )
@@ -37,6 +39,7 @@ __all__ = [
     "ComfyBinding",
     "EstimateReply",
     "EstimateRequest",
+    "JobSettlement",
     "ModelDescriptor",
     "Money",
     "NodeCatalog",
@@ -44,6 +47,7 @@ __all__ = [
     "NodeEstimate",
     "NodeInputs",
     "NodePricingAuthorization",
+    "NodeSettlement",
     "OpenAIBinding",
     "Operation",
     "Package",

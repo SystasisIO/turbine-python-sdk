@@ -97,14 +97,13 @@ def substitute_asset_handles(graph: Any, refs: dict[int, dict[str, Any]]) -> Any
     return graph
 
 
-# UI-export detection: the ComfyUI editor export carries these top-level keys,
-# whereas the API format is a flat node-id -> node map. Catching it locally lets
-# the SDK fail fast with a clear message instead of relying only on the server.
-_UI_KEYS = ("nodes", "links", "last_node_id")
-
-
 def looks_like_ui_format(graph: dict[str, Any]) -> bool:
-    return isinstance(graph, dict) and all(k in graph for k in _UI_KEYS)
+    # UI exports store arrays here. An API graph can use these names as node IDs.
+    return (
+        isinstance(graph, dict)
+        and isinstance(graph.get("nodes"), list)
+        and isinstance(graph.get("links"), list)
+    )
 
 
 def validate_idempotency_key(key: str) -> str:

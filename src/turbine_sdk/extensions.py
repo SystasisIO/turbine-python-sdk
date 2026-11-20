@@ -1,4 +1,4 @@
-"""The native Turbine catalog and prepared-graph price-preview namespace."""
+"""The native Turbine catalog, price preview, and Job settlement namespace."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 from turbine_low.models.catalog import NodeCatalog
 from turbine_low.models.graph import PromptGraph
 from turbine_low.models.packages import CATALOG_DEFAULT_LIMIT, CatalogSnapshot, Package, PackagePage
-from turbine_low.models.pricing import EstimateReply
+from turbine_low.models.pricing import EstimateReply, JobSettlement
 from turbine_low.transport import AsyncTurbineLow, TurbineLow
 
 from .exceptions import translating
@@ -117,15 +117,30 @@ class TurbineExtensions:
         self.nodes = Nodes(low)
         self.packages = Packages(low)
 
-    def estimate_prompt(self, prompt: PromptGraph | dict[str, Any]) -> EstimateReply:
+    def estimate_prompt(
+        self,
+        prompt: PromptGraph | dict[str, Any],
+        *,
+        partial_execution_targets: list[str] | None = None,
+    ) -> EstimateReply:
         """Preview a prepared JSON graph without uploading or running anything.
 
         For v2 asset inputs, prepare the graph with an uploaded asset's
         ``as_reference()`` and pass that same graph to submit. Asset handles
         and other non-JSON values are rejected before HTTP.
+
+        Pass node IDs as ``partial_execution_targets`` to price only those
+        targets and their dependencies. Submit with the same selection.
         """
         with translating():
-            return self._low.post_prompt_estimate(prompt)
+            return self._low.post_prompt_estimate(
+                prompt, partial_execution_targets=partial_execution_targets
+            )
+
+    def job_settlement(self, job_id: str) -> JobSettlement:
+        """Read payment state by ``Job.id`` with the submitting owner's credential."""
+        with translating():
+            return self._low.get_job_settlement(job_id)
 
 
 class AsyncTurbineExtensions:
@@ -136,10 +151,22 @@ class AsyncTurbineExtensions:
         self.nodes = AsyncNodes(low)
         self.packages = AsyncPackages(low)
 
-    async def estimate_prompt(self, prompt: PromptGraph | dict[str, Any]) -> EstimateReply:
-        """Preview a prepared JSON graph without uploading or running anything."""
+    async def estimate_prompt(
+        self,
+        prompt: PromptGraph | dict[str, Any],
+        *,
+        partial_execution_targets: list[str] | None = None,
+    ) -> EstimateReply:
+        """Async counterpart of :meth:`TurbineExtensions.estimate_prompt`."""
         with translating():
-            return await self._low.post_prompt_estimate(prompt)
+            return await self._low.post_prompt_estimate(
+                prompt, partial_execution_targets=partial_execution_targets
+            )
+
+    async def job_settlement(self, job_id: str) -> JobSettlement:
+        """Async counterpart of :meth:`TurbineExtensions.job_settlement`."""
+        with translating():
+            return await self._low.get_job_settlement(job_id)
 
 
 __all__ = [

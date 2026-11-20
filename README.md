@@ -194,8 +194,11 @@ For paid submission, omit the optional partner-node `api_key` argument to
 
 A `201` response confirms admission. `job.status == "succeeded"` confirms that
 the workflow ran successfully. The estimate and submitted `pricing` show the
-spending limits. The deployment tracks final charges and refunds separately
-from the SDK's Job responses.
+spending limits. Read the confirmed charges with `client.turbine.job_settlement(job.id)`.
+
+For a partial run, pass the same `partial_execution_targets` list of node IDs
+to `estimate_prompt` and `submit`. Turbine selects those nodes and their
+dependencies from the prepared graph.
 
 The SDK sends the UUID in `Idempotency-Key` and in `metadata.backend_job_id`.
 On `409 payment_terms_mismatch` or `409 payment_budget_exceeded`, obtain a fresh
@@ -216,6 +219,25 @@ if len(matches) == 1:
 Keep an ambiguous submission pending when you cannot confirm one exact match
 and its full Job. The async client uses the same authorization and lookup
 with `await` and `async for`.
+
+## Job settlement
+
+Use the same Turbine deployment and owner to read settlement by `Job.id`.
+
+```python
+settlement = client.turbine.job_settlement(job.id)
+if settlement.status == "final":
+    print(settlement.total)
+    for node in settlement.nodes:
+        print(node.node_id, node.outcome, node.charge)
+```
+
+`AsyncTurbine` exposes the same method with `await`. The return type is
+`turbine_sdk.schemas.JobSettlement`. A `final` result includes every selected
+node's admitted terms, outcome and confirmed charge, and can carry an explicit
+zero total. `pending` means the final evidence is still unavailable.
+`not_applicable` identifies a Job created without payment authorization.
+Both states have `total=None` and `nodes=[]`. A `404` raises `NotFound`.
 
 ## Service package catalog
 

@@ -17,6 +17,7 @@ The fork's Python names and transport are independent of those wire contracts.
 | Native node catalog | Agreed native Comfy object_info response | `client.turbine.nodes.list/get` | Local HTTP stub | NOT_RUN |
 | Service package catalog | TurbineOS service package catalog contract | `client.turbine.packages.snapshot/list/get` | Local HTTP stub and shared schema tests | NOT_RUN |
 | Prepared prompt estimate and paid submission | Turbine pricing extension in `spec/turbine-pricing.openapi.yaml` | `client.turbine.estimate_prompt`, `submit(pricing=...)` | Local HTTP stub and shared schema tests | NOT_RUN |
+| Owner Job settlement | Turbine pricing extension in `spec/turbine-pricing.openapi.yaml` | `client.turbine.job_settlement(job.id)` | Local HTTP stub and shared schema tests | NOT_RUN |
 
 The local stub verifies the SDK's request and response behavior. Financial
 admission, final charges and refunds, and native frontend HTTP/WebSocket
@@ -34,9 +35,10 @@ conversion require server verification.
 - Estimate takes prepared JSON and sends `X-Turbine-Pricing: 1` to request
   payment terms. Use the same prepared `core/ASSET` input for estimate and
   v2 submission. A legacy estimate response leaves `estimate.pricing` at `None`.
-- Paid submission sends `pricing` as spending authorization. Job status and
-  events report execution. The deployment tracks final charges and refunds
-  separately from the SDK's Job responses.
+- Paid submission sends `pricing` as spending authorization. Pass the same
+  `partial_execution_targets` to estimate and submit for a partial run.
+  Job status and events report execution. `client.turbine.job_settlement(job.id)`
+  reads the owner's financial state and includes charges when settlement is final.
 - Supply `base_url` or `TURBINE_BASE_URL`. Router is disabled unless explicitly
   configured. No token is automatically sent to Comfy Cloud or Comfy Router.
 - Supplied HTTPX2 clients remain caller-owned; SDK-created clients are closed
@@ -104,6 +106,8 @@ A live TurbineOS deployment must confirm v2 methods, metadata/list semantics,
 SSE and the native extension routes. For paid submission, this includes
 admission with the authorized terms and lost-response recovery using
 `backend_job_id` on the same deployment with the submitting credential.
+Settlement qualification also requires checking the final result against
+the deployment's verified financial evidence.
 
 ## Release state
 

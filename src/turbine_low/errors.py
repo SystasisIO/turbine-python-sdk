@@ -109,6 +109,7 @@ class ApiError(Exception):
         body_excerpt: str | None = None,
         error_type: str | None = None,
         validation_errors: Sequence[Mapping[str, Any]] = (),
+        envelope_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -116,6 +117,7 @@ class ApiError(Exception):
             self.code = code
         self.http_status = http_status
         self.details = details
+        self.envelope_code = envelope_code
         #: The raw, decoded entries of a Router per-field validation body's
         #: ``detail`` *array*, in wire order and unconverted — every entry that
         #: decoded as a mapping, and nothing else. Empty for every other
@@ -525,7 +527,9 @@ def error_from_envelope(
     # Without it `{"error": {"code": ""}}` is not None, so it short-circuits
     # both the Router bucket and the status table below and a bare 401 yields
     # `ApiError(code="")` instead of `Unauthorized`.
-    code = _clean((err or {}).get("code") if isinstance(err, dict) else None)
+    raw_code = err.get("code") if isinstance(err, dict) else None
+    code = _clean(raw_code)
+    envelope_code = code if raw_code == code else None
     # Through `clean_body_excerpt`, not `_clean`: `message` ends up as
     # `str(exc)`, and this is display text the server (or whatever answered for
     # it) chose. A non-string still reads as absent — `clean_body_excerpt`
@@ -611,6 +615,7 @@ def error_from_envelope(
         body_excerpt=body_excerpt,
         error_type=bucket,
         validation_errors=validation_errors,
+        envelope_code=envelope_code,
     )
 
 

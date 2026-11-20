@@ -1,8 +1,8 @@
-"""Shared Turbine pricing preview and submission authorization schemas."""
+"""Shared Turbine pricing, submission authorization, and settlement schemas."""
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -12,9 +12,10 @@ from pydantic import (
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
-from ._scalars import Identifier, Sha256Digest
+from ._scalars import CanonicalUuid, ExecutionTargets, Identifier, Sha256Digest
 from .graph import PromptGraph
 
 
@@ -68,9 +69,7 @@ class PricingAsset(Money):
         return value
 
 
-class NodePricingAuthorization(_PricingModel):
-    """The exact release, binding and tariff with a limit for one node."""
-
+class _NodePricingTerms(_PricingModel):
     node_id: Identifier
     package_hash: Sha256Digest
     operation_id: Identifier
@@ -81,7 +80,6 @@ class NodePricingAuthorization(_PricingModel):
     version: Annotated[str, Field(pattern=r"^[1-9][0-9]{0,19}$")]
     terms_hash: Sha256Digest
     binding_digest: Sha256Digest
-    maximum: PricingAsset
 
     @field_validator("service", "version")
     @classmethod
@@ -89,6 +87,12 @@ class NodePricingAuthorization(_PricingModel):
         if int(value) > (1 << 64) - 1:
             raise ValueError("tariff identifier exceeds the unsigned 64-bit range")
         return value
+
+
+class NodePricingAuthorization(_NodePricingTerms):
+    """The exact release, binding and tariff with a limit for one node."""
+
+    maximum: PricingAsset
 
 
 class PricingAuthorization(_PricingModel):
@@ -103,9 +107,17 @@ class _EstimateExtension(_PricingModel):
 
 
 class EstimateRequest(_PricingModel):
-    """The complete estimate request: one prepared prompt graph."""
+    """One prepared prompt graph and optional partial execution targets."""
 
     prompt: PromptGraph
+    partial_execution_targets: ExecutionTargets | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_targets(self, handler: SerializerFunctionWrapHandler):
+        data: dict[str, Any] = handler(self)
+        if data.get("partial_execution_targets") is None:
+            data.pop("partial_execution_targets", None)
+        return data
 
 
 class EstimateReply(_PricingModel):
@@ -137,12 +149,60 @@ class EstimateReply(_PricingModel):
         return data
 
 
+class NodeSettlement(_NodePricingTerms):
+    """The admitted terms and confirmed charge for one selected node."""
+
+    charge: PricingAsset
+    outcome: Literal["settled", "released", "not_opened", "zero_price"]
+
+    @model_validator(mode="after")
+    def _validate_charge(self) -> Self:
+        if (self.outcome == "settled") != (self.charge.amount != "0"):
+            raise ValueError("a positive charge requires the settled outcome and vice versa")
+        return self
+
+
+class JobSettlement(_PricingModel):
+    """Financial state for an owner-visible job with exact per-node charges when final."""
+
+    job_id: CanonicalUuid
+    status: Literal["pending", "final", "not_applicable"]
+    total: PricingAsset | None
+    nodes: Annotated[list[NodeSettlement], Field(max_length=4096)]
+
+    @model_validator(mode="after")
+    def _validate_breakdown(self) -> Self:
+        if self.status != "final":
+            if self.total is not None or self.nodes:
+                raise ValueError("only final settlement has a total or node charges")
+            return self
+
+        if self.total is None or not self.nodes:
+            raise ValueError("final settlement requires a total and node charges")
+        if len({node.node_id for node in self.nodes}) != len(self.nodes):
+            raise ValueError("settlement node IDs must be unique")
+        chain_id = self.nodes[0].chain_id
+        if any(node.chain_id != chain_id for node in self.nodes):
+            raise ValueError("settlement nodes must use one chain")
+        denomination = (self.total.contract, self.total.unit, self.total.precision)
+        if any(
+            (node.charge.contract, node.charge.unit, node.charge.precision) != denomination
+            for node in self.nodes
+        ):
+            raise ValueError("all settlement charges must use the same asset as the total")
+        if sum(int(node.charge.amount) for node in self.nodes) != int(self.total.amount):
+            raise ValueError("settlement total must equal the sum of the node charges")
+        return self
+
+
 __all__ = [
     "EstimateReply",
     "EstimateRequest",
+    "JobSettlement",
     "Money",
     "NodeEstimate",
     "NodePricingAuthorization",
+    "NodeSettlement",
     "PricingAsset",
     "PricingAuthorization",
 ]

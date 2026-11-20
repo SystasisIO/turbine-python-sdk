@@ -66,6 +66,10 @@ class TurbineError(Exception):
     #: required ``int``.
     retry_after: int | None = None
 
+    #: Exact v2 ``error.code`` from the response body, when provided.
+    #: A status-derived ``code`` leaves this value unset.
+    envelope_code: str | None = None
+
     #: ``True`` only on the failure :meth:`turbine_sdk.models.Models.run` re-raises
     #: after a same-key resend was refused — the original failure, with the key
     #: refusal on ``__cause__``. It exists for outer retry wrappers: a wrapper
@@ -91,6 +95,7 @@ class TurbineError(Exception):
         details: dict[str, Any] | None = None,
         request_id: str | None = None,
         retry_after: int | None = None,
+        envelope_code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -99,6 +104,7 @@ class TurbineError(Exception):
         self.details = details
         self.request_id = request_id
         self.retry_after = retry_after
+        self.envelope_code = envelope_code
 
 
 __all__ = ["TurbineError"]

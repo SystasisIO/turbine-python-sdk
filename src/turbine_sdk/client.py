@@ -17,6 +17,7 @@ from uuid import UUID
 import httpx2
 
 from turbine_low.errors import ApiError
+from turbine_low.extension_transport import prepare_execution_targets
 from turbine_low.models.pricing import PricingAuthorization
 from turbine_low.transport import (
     AsyncTurbineLow,
@@ -143,7 +144,7 @@ def _resolve_api_key(explicit: str | None | _ApiKeyUnset) -> str | None:
 def _guard_ui_format(workflow: Workflow) -> None:
     if _core.looks_like_ui_format(workflow.json):
         raise WorkflowFormatUi(
-            "workflow is in UI-export format (nodes/links/last_node_id); submit "
+            "workflow is in UI-export format (nodes and links arrays); submit "
             "the API-format graph instead",
             code="workflow_format_ui",
             http_status=422,
@@ -260,6 +261,8 @@ class Turbine:
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
         pricing: PricingAuthorization | None = None,
+        partial_execution_targets: list[str] | None = None,
+        retry_queue_full: bool = True,
     ) -> Job:
         """Submit a workflow. Retries any 429 that carries ``Retry-After``.
 
@@ -313,9 +316,18 @@ class Turbine:
         The SDK also sends it as the ``backend_job_id`` label. If the response
         is lost, use that label with ``list_jobs`` and read the match with
         ``jobs.get`` on the same authenticated deployment.
+        Paid submissions surface HTTP redirects as errors for reconciliation.
+
+        For a partial workflow, pass the same ``partial_execution_targets``
+        node IDs used to estimate the graph.
+
+        Set ``retry_queue_full=False`` to surface admission throttling responses
+        immediately under the submitted key.
         """
         _guard_ui_format(workflow)
         key, metadata, pricing = _submission_options(idempotency_key, metadata, pricing)
+        if partial_execution_targets is not None:
+            partial_execution_targets = prepare_execution_targets(partial_execution_targets)
         graph = self._materialize(workflow)
         extra_data = _core.extra_data_for(api_key)
         deadline = _now() + _QUEUE_RETRY_BUDGET
@@ -333,11 +345,12 @@ class Turbine:
                         extra_data=extra_data,
                         metadata=metadata,
                         pricing=pricing,
+                        partial_execution_targets=partial_execution_targets,
                     )
                     return Job(self._low, model)
                 except ApiError as exc:
                     err = to_sdk_error(exc)
-                    delay = _retry_delay(exc, deadline)
+                    delay = _retry_delay(exc, deadline) if retry_queue_full else None
                     if delay is None:
                         raise err from exc
                     time.sleep(delay)
@@ -499,12 +512,16 @@ class AsyncTurbine:
         idempotency_key: str | None = None,
         metadata: Mapping[str, str] | None = None,
         pricing: PricingAuthorization | None = None,
+        partial_execution_targets: list[str] | None = None,
+        retry_queue_full: bool = True,
     ) -> AsyncJob:
         """Async counterpart of :meth:`Turbine.submit`, including paid pricing terms."""
         import asyncio
 
         _guard_ui_format(workflow)
         key, metadata, pricing = _submission_options(idempotency_key, metadata, pricing)
+        if partial_execution_targets is not None:
+            partial_execution_targets = prepare_execution_targets(partial_execution_targets)
         graph = await self._materialize(workflow)
         extra_data = _core.extra_data_for(api_key)
         deadline = _now() + _QUEUE_RETRY_BUDGET
@@ -519,11 +536,12 @@ class AsyncTurbine:
                         extra_data=extra_data,
                         metadata=metadata,
                         pricing=pricing,
+                        partial_execution_targets=partial_execution_targets,
                     )
                     return AsyncJob(self._low, model)
                 except ApiError as exc:
                     err = to_sdk_error(exc)
-                    delay = _retry_delay(exc, deadline)
+                    delay = _retry_delay(exc, deadline) if retry_queue_full else None
                     if delay is None:
                         raise err from exc
                     await asyncio.sleep(delay)

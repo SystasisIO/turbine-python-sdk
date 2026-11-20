@@ -18,19 +18,21 @@ from .errors import (
     error_from_envelope,
     summarise_detail,
 )
-from .models._scalars import Sha256Digest
+from .models._scalars import CanonicalUuid, ExecutionTargets, Sha256Digest
 from .models.graph import PromptGraph
 from .models.packages import CatalogLimit, CatalogToken
-from .models.pricing import EstimateRequest
+from .models.pricing import EstimateRequest, JobSettlement
 
 NODES_PATH = "/api/object_info"
 ESTIMATE_PATH = "/api/prompt/estimate"
+JOB_SETTLEMENT_PATH = "/api/v2/jobs/{id}/settlement"
 CATALOG_PATH = "/api/broker/v1/catalog"
 PACKAGES_PATH = CATALOG_PATH + "/packages"
 EXTENSION_ROUTES = (
     ("GET", NODES_PATH),
     ("GET", NODES_PATH + "/{class_type}"),
     ("POST", ESTIMATE_PATH),
+    ("GET", JOB_SETTLEMENT_PATH),
     ("GET", CATALOG_PATH),
     ("GET", PACKAGES_PATH),
     ("GET", PACKAGES_PATH + "/{package_hash}"),
@@ -44,6 +46,8 @@ _BEARER = re.compile(r"\bBearer[ \t]+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
 _TOKEN: TypeAdapter[str] = TypeAdapter(CatalogToken)
 _LIMIT: TypeAdapter[int] = TypeAdapter(CatalogLimit)
 _DIGEST: TypeAdapter[str] = TypeAdapter(Sha256Digest)
+_JOB_ID: TypeAdapter[str] = TypeAdapter(CanonicalUuid)
+_EXECUTION_TARGETS: TypeAdapter[list[str]] = TypeAdapter(ExecutionTargets)
 
 
 class _AllNodes:
@@ -95,11 +99,16 @@ def estimate_url(base_url: str) -> str:
     return base_url.rstrip("/") + ESTIMATE_PATH
 
 
+def job_settlement_url(base_url: str, job_id: str) -> str:
+    identifier = _validate_parameter("job_id", job_id, _JOB_ID)
+    return base_url.rstrip("/") + JOB_SETTLEMENT_PATH.format(id=identifier)
+
+
 def catalog_snapshot_url(base_url: str) -> str:
     return base_url.rstrip("/") + CATALOG_PATH
 
 
-def _catalog_parameter(name: str, value: object, adapter: TypeAdapter[_Parameter]) -> _Parameter:
+def _validate_parameter(name: str, value: object, adapter: TypeAdapter[_Parameter]) -> _Parameter:
     try:
         return adapter.validate_python(value, strict=True)
     except ValidationError:
@@ -109,25 +118,33 @@ def _catalog_parameter(name: str, value: object, adapter: TypeAdapter[_Parameter
 def catalog_page_url(
     base_url: str, *, catalog_revision: str, cursor: str | None, limit: int
 ) -> str:
-    params = {"catalog_revision": _catalog_parameter("catalog_revision", catalog_revision, _TOKEN)}
+    params = {"catalog_revision": _validate_parameter("catalog_revision", catalog_revision, _TOKEN)}
     if cursor is not None:
-        params["cursor"] = _catalog_parameter("cursor", cursor, _TOKEN)
-    params["limit"] = str(_catalog_parameter("limit", limit, _LIMIT))
+        params["cursor"] = _validate_parameter("cursor", cursor, _TOKEN)
+    params["limit"] = str(_validate_parameter("limit", limit, _LIMIT))
     query = urlencode(params, quote_via=quote)
     return f"{base_url.rstrip('/')}{PACKAGES_PATH}?{query}"
 
 
 def catalog_package_url(base_url: str, package_hash: str, *, catalog_revision: str) -> str:
-    digest = _catalog_parameter("package_hash", package_hash, _DIGEST)
-    revision = _catalog_parameter("catalog_revision", catalog_revision, _TOKEN)
+    digest = _validate_parameter("package_hash", package_hash, _DIGEST)
+    revision = _validate_parameter("catalog_revision", catalog_revision, _TOKEN)
     query = urlencode({"catalog_revision": revision}, quote_via=quote)
     return f"{base_url.rstrip('/')}{PACKAGES_PATH}/{digest}?{query}"
 
 
-def prepare_estimate(prompt: PromptGraph | dict[str, Any]) -> dict[str, Any]:
+def prepare_execution_targets(targets: list[str]) -> list[str]:
+    return _validate_parameter("partial_execution_targets", targets, _EXECUTION_TARGETS)
+
+
+def prepare_estimate(
+    prompt: PromptGraph | dict[str, Any], *, partial_execution_targets: list[str] | None = None
+) -> dict[str, Any]:
     """Validate the whole graph before HTTP, including an existing mutable model."""
     prepared = PromptGraph.model_validate(prompt)
-    return EstimateRequest(prompt=prepared).model_dump(mode="json")
+    return EstimateRequest(
+        prompt=prepared, partial_execution_targets=partial_execution_targets
+    ).model_dump(mode="json")
 
 
 def _safe_details(value: Any, secrets: tuple[str, ...]) -> Any:
@@ -226,6 +243,29 @@ def _catalog_error(
     )
 
 
+def _job_settlement_error(
+    resp: httpx2.Response,
+    body: Any,
+    retry_after: int | None,
+    request_id: str | None,
+) -> ApiError:
+    error = body.get("error") if isinstance(body, dict) else None
+    envelope = None
+    if isinstance(error, dict):
+        try:
+            sanitized = _safe_details(error, _request_secrets(resp))
+        except RecursionError:
+            pass
+        else:
+            code = sanitized.get("code")
+            if not isinstance(code, str) or _CODE.fullmatch(code) is None:
+                sanitized.pop("code", None)
+            envelope = {"error": sanitized}
+    return error_from_envelope(
+        resp.status_code, envelope, retry_after=retry_after, request_id=request_id
+    )
+
+
 def _parse_extension_response(
     resp: httpx2.Response,
     model: type[_Model],
@@ -305,18 +345,40 @@ def parse_catalog_response(
     )
 
 
+def parse_job_settlement_response(
+    resp: httpx2.Response,
+    job_id: str,
+    *,
+    retry_after: int | None,
+    request_id: str | None,
+) -> JobSettlement:
+    return _parse_extension_response(
+        resp,
+        JobSettlement,
+        name="Job settlement",
+        error_parser=_job_settlement_error,
+        retry_after=retry_after,
+        request_id=clean_request_id(_safe_text(request_id, _request_secrets(resp))),
+        matches_request=lambda settlement: settlement.job_id == job_id,
+    )
+
+
 __all__ = [
     "CATALOG_PATH",
     "ESTIMATE_PATH",
     "EXTENSION_ROUTES",
+    "JOB_SETTLEMENT_PATH",
     "NODES_PATH",
     "PACKAGES_PATH",
     "catalog_package_url",
     "catalog_page_url",
     "catalog_snapshot_url",
     "estimate_url",
+    "job_settlement_url",
     "node_catalog_url",
     "parse_catalog_response",
+    "parse_job_settlement_response",
     "parse_native_response",
     "prepare_estimate",
+    "prepare_execution_targets",
 ]

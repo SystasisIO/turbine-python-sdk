@@ -7,7 +7,8 @@ operations tagged `internal` or `x-internal: true` for the public repository.
 - **`router-openapi.yaml`** — the **Comfy Router** public contract (OpenAPI 3.0.2): the model catalog and the model-ID-addressed invocation routes, with the error buckets they return. Nothing is generated from it today. What it does gate is the typed error surface: its `RouterErrorType.x-comfy-error-types` list is the closed error set, and `scripts/check_drift.py` fails unless `comfy_sdk.router_exceptions.ROUTER_ERROR_TYPES` is **exactly that list of values, in exactly that order** — so a bucket added, removed or reordered upstream all fail it, not only an addition. It also fails when an entry's `meaning` prose changes, against the per-class `_spec_meaning_digest` read markers described below. `tests/test_router_spec_contract.py` asserts the same things from the suite.
 
 The [Turbine pricing extension](turbine-pricing.openapi.yaml) defines the
-paid profile for the native estimate endpoint and Comfy v2 job submission.
+paid profile for the native estimate endpoint, Comfy v2 job submission, and
+the owner's settlement read.
 Its Pydantic models live in `src/turbine_low/models/pricing.py`.
 
 **Syncing a new Router spec is therefore a three-step change** — the new spec, the class table, and a re-bless of the docstrings whose prose moved — and the drift check is what makes the second and third steps unskippable. After dropping in the new `router-openapi.yaml`, reconcile `src/comfy_sdk/router_exceptions.py` against it:

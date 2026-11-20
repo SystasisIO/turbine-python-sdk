@@ -105,6 +105,7 @@ def test_a_bucketless_429_still_means_queue_full() -> None:
     # still what names it, exactly as before the generalization.
     err = error_from_envelope(429, None, retry_after=3)
     assert err.code == "queue_full"
+    assert err.envelope_code is None
     assert isinstance(err, QueueFull)
     assert err.retry_after == 3
 
